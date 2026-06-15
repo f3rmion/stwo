@@ -266,9 +266,164 @@ pub fn prove_fibonacci_plonk(
     (component, proof)
 }
 
+/// Statistical zero-knowledge variant of [`prove_fibonacci_plonk`].
+///
+/// Builds the same PLONK circuit, preprocessed/trace/interaction trees and
+/// LogUp lookup as the transparent harness, but proves through `prove_zk`, which
+/// masks the committed composition quotient `q` by an independent random secure
+/// polynomial `t` (committing `q' = q + t` split, plus `t` unsplit as a separate
+/// last tree). The global FRI lifting is forced to the height of the taller `t`
+/// tree so every committed tree shares a fold height.
+///
+/// `randomizer_dimension` controls how many independent base-field coefficients
+/// each of `t`'s four coordinate polynomials carries; it must fit the composition
+/// coefficient space `2^composition_log_size`.
+#[cfg(feature = "statistical-zk")]
+#[allow(clippy::type_complexity)]
+pub fn prove_fibonacci_plonk_zk(
+    log_n_rows: u32,
+    config: PcsConfig,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    randomizer_dimension: usize,
+) -> (
+    PlonkComponent,
+    stwo::core::proof::ExtendedStarkProof<Blake2sMerkleHasher>,
+) {
+    use stwo::prover::prove_zk;
+
+    assert!(log_n_rows >= LOG_N_LANES);
+    // The composition lives at `composition_log_degree_bound = log_n_rows + 1`
+    // for this AIR (max_constraint_log_degree_bound = log_n_rows + 1). The forced
+    // lifting must accommodate the unsplit `t` tree, one log size above the split
+    // composition chunks, at `log_n_rows + 1 + log_blowup_factor`.
+    let log_blowup = config.fri_config.log_blowup_factor;
+    assert_eq!(
+        config.lifting_log_size,
+        Some(log_n_rows + 1 + log_blowup),
+        "ZK path requires lifting forced to log_n_rows + 1 + log_blowup_factor"
+    );
+
+    // Prepare a fibonacci circuit (identical to the transparent harness).
+    let mut fib_values = vec![BaseField::one(), BaseField::one()];
+    for _ in 0..(1 << log_n_rows) {
+        fib_values.push(fib_values[fib_values.len() - 1] + fib_values[fib_values.len() - 2]);
+    }
+    let range = 0..(1 << log_n_rows);
+    let mut circuit = PlonkCircuitTrace {
+        mult: range.clone().map(|_| 2.into()).collect(),
+        a_wire: range.clone().map(|i| i.into()).collect(),
+        b_wire: range.clone().map(|i| (i + 1).into()).collect(),
+        c_wire: range.clone().map(|i| (i + 2).into()).collect(),
+        op: range.clone().map(|_| 1.into()).collect(),
+        a_val: range.clone().map(|i| fib_values[i]).collect(),
+        b_val: range.clone().map(|i| fib_values[i + 1]).collect(),
+        c_val: range.clone().map(|i| fib_values[i + 2]).collect(),
+    };
+    circuit.mult.set((1 << log_n_rows) - 1, 0.into());
+    circuit.mult.set((1 << log_n_rows) - 2, 1.into());
+
+    // Precompute twiddles. The unsplit `t` tree reaches `log_n_rows + 1 +
+    // log_blowup`, so the twiddle domain must cover that height.
+    let span = span!(Level::INFO, "Precompute twiddles").entered();
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(log_n_rows + 1 + log_blowup)
+            .circle_domain()
+            .half_coset,
+    );
+    span.exit();
+
+    // Setup protocol.
+    let channel = &mut Blake2sChannel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    // Preprocessed trace.
+    let span = span!(Level::INFO, "Constant").entered();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let constant_trace = [
+        circuit.a_wire.clone(),
+        circuit.b_wire.clone(),
+        circuit.c_wire.clone(),
+        circuit.op.clone(),
+    ]
+    .into_iter()
+    .map(|col| {
+        CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(
+            CanonicCoset::new(log_n_rows).circle_domain(),
+            col,
+        )
+    })
+    .collect_vec();
+    let constants_trace_location = tree_builder.extend_evals(constant_trace);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Trace.
+    let span = span!(Level::INFO, "Trace").entered();
+    let trace = gen_trace(log_n_rows, &circuit);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let base_trace_location = tree_builder.extend_evals(trace);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Draw lookup element.
+    let lookup_elements = PlonkLookupElements::draw(channel);
+
+    // Interaction trace.
+    let span = span!(Level::INFO, "Interaction").entered();
+    let (trace, claimed_sum) = gen_interaction_trace(log_n_rows, &circuit, &lookup_elements.0);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let interaction_trace_location = tree_builder.extend_evals(trace);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Prove constraints.
+    let component = PlonkComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PlonkEval {
+            log_n_rows,
+            lookup_elements,
+            claimed_sum,
+            base_trace_location,
+            interaction_trace_location,
+            constants_trace_location,
+        },
+        claimed_sum,
+    );
+
+    // Sanity check the AIR on the underlying polynomials (unmasked).
+    let trace_polys = commitment_scheme.trees.as_ref().map(|t| {
+        t.polynomials
+            .iter()
+            .map(|p| p.coeffs.clone().unwrap())
+            .collect_vec()
+    });
+    let component_eval = component.clone();
+    assert_constraints_on_polys(
+        &trace_polys,
+        CanonicCoset::new(log_n_rows),
+        |assert_eval| {
+            component_eval.evaluate(assert_eval);
+        },
+        claimed_sum,
+    );
+
+    let proof = prove_zk::<SimdBackend, Blake2sMerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+        rng,
+        randomizer_dimension,
+    )
+    .unwrap();
+
+    (component, proof)
+}
+
 /// Preprocessed columns for describing a plonk circuit.
 /// Each plonk gate is described by input wires `a_wire`, `b_wire`, output wire `c_wire`, and
-/// operation `op`.  
+/// operation `op`.
 #[derive(Debug)]
 pub struct Plonk {
     pub name: String,
@@ -335,5 +490,121 @@ mod tests {
         commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
 
         verify(&[&component], channel, commitment_scheme, proof).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "statistical-zk"))]
+mod zk_tests {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use stwo::core::air::Component;
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+    use stwo::core::verifier::verify_zk;
+
+    use crate::plonk::{prove_fibonacci_plonk_zk, PlonkLookupElements};
+
+    /// Builds the PLONK PcsConfig with the FRI lifting forced to accommodate the
+    /// taller unsplit composition-randomizer tree. The PLONK AIR has
+    /// `composition_log_degree_bound = log_n_rows + 1`, so the randomizer tree
+    /// reaches `log_n_rows + 1 + log_blowup_factor`.
+    fn zk_config(log_n_rows: u32) -> PcsConfig {
+        let log_blowup = 1;
+        PcsConfig {
+            pow_bits: 10,
+            fri_config: FriConfig::new(5, log_blowup, 64, 1),
+            lifting_log_size: Some(log_n_rows + 1 + log_blowup),
+        }
+    }
+
+    /// Commits preprocessed/trace/interaction trees and redraws the lookup
+    /// elements exactly as the transparent harness, then runs `verify_zk`. The
+    /// composition-chunk and randomizer commitments are consumed inside
+    /// `verify_zk`.
+    fn verify_plonk_zk(
+        component: &crate::plonk::PlonkComponent,
+        proof: stwo::core::proof::StarkProof<
+            stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher,
+        >,
+        config: PcsConfig,
+    ) {
+        let channel = &mut Blake2sChannel::default();
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+
+        let sizes = component.trace_log_degree_bounds();
+
+        // Preprocessed columns.
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], channel);
+        // Trace columns.
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
+        // Redraw lookup element.
+        let lookup_elements = PlonkLookupElements::draw(channel);
+        assert_eq!(lookup_elements, component.lookup_elements);
+        // Interaction columns.
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
+
+        // Composition (commitments[3]) and t (commitments[4]) are committed inside
+        // verify_zk.
+        verify_zk(&[component], channel, commitment_scheme, proof, false).unwrap();
+    }
+
+    #[test]
+    fn test_simd_plonk_prove_zk() {
+        for log_n_rows in 5..=7 {
+            let config = zk_config(log_n_rows);
+            let mut rng = StdRng::seed_from_u64(2024);
+            // 64 over-provisions the randomizer; for these sizes it fits the
+            // composition coefficient space 2^(log_n_rows + 1).
+            let randomizer_dimension = 64;
+
+            let (component, extended_proof) =
+                prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng, randomizer_dimension);
+
+            verify_plonk_zk(&component, extended_proof.proof, config);
+        }
+    }
+
+    /// Randomization smoke check (mechanism evidence, NOT a no-leak certificate):
+    /// proves the same witness twice under two different rng seeds and asserts
+    /// (a) both proofs verify, and (b) the committed composition-randomizer `t`
+    /// OODS values differ between the runs, confirming `t` actually randomizes
+    /// the committed composition.
+    #[test]
+    fn test_plonk_prove_zk_randomization_smoke() {
+        let log_n_rows = 6;
+        let config = zk_config(log_n_rows);
+        let randomizer_dimension = 64;
+
+        let mut rng_a = StdRng::seed_from_u64(1);
+        let (component_a, proof_a) =
+            prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng_a, randomizer_dimension);
+
+        let mut rng_b = StdRng::seed_from_u64(99999);
+        let (component_b, proof_b) =
+            prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng_b, randomizer_dimension);
+
+        // The unsplit randomizer `t` is the last sampled-values tree; the split
+        // composition chunks are the second-to-last. Diff both across the two runs
+        // to confirm the randomizer perturbs the committed composition openings.
+        let t_a = proof_a.proof.sampled_values.last().unwrap();
+        let t_b = proof_b.proof.sampled_values.last().unwrap();
+        assert_ne!(
+            t_a, t_b,
+            "composition randomizer t OODS values must differ between rng seeds"
+        );
+
+        let n = proof_a.proof.sampled_values.len();
+        let comp_a = &proof_a.proof.sampled_values[n - 2];
+        let comp_b = &proof_b.proof.sampled_values[n - 2];
+        assert_ne!(
+            comp_a, comp_b,
+            "masked composition q' OODS values must differ between rng seeds"
+        );
+
+        // Both proofs must verify under the same redraw protocol.
+        verify_plonk_zk(&component_a, proof_a.proof, config);
+        verify_plonk_zk(&component_b, proof_b.proof, config);
     }
 }
