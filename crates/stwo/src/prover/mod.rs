@@ -23,6 +23,8 @@ pub mod lookups;
 pub mod mempool;
 pub mod poly;
 pub mod secure_column;
+#[cfg(feature = "statistical-zk")]
+pub mod statistical_zk;
 pub mod vcs;
 pub mod vcs_lifted;
 
