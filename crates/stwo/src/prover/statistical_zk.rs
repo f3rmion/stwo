@@ -42,7 +42,7 @@ use crate::core::fields::m31::{BaseField, P as M31_MODULUS};
 use crate::core::fields::ExtensionOf;
 use crate::core::poly::circle::{CanonicCoset, CircleDomain};
 use crate::prover::backend::{Col, Column};
-use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
+use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps, SecureCirclePoly};
 use crate::prover::poly::BitReversedOrder;
 
 /// Per-column parameters for Layer-1 witness masking.
@@ -234,6 +234,13 @@ pub enum WitnessMaskError {
         witness_log_size: u32,
         trace_log_size: u32,
     },
+    #[error("composition randomizer dimension {dimension} exceeds coefficient space {coeff_count}")]
+    CompositionRandomizerDimensionTooLarge { dimension: usize, coeff_count: usize },
+    #[error("composition randomizer log size {randomizer_log_size} does not match composition log size {composition_log_size}")]
+    CompositionRandomizerLogSizeMismatch {
+        randomizer_log_size: u32,
+        composition_log_size: u32,
+    },
 }
 
 /// Masks a witness column: returns `ŵ = w + v_H · r`.
@@ -308,6 +315,83 @@ where
     Ok(CircleCoefficients::new(coeffs))
 }
 
+// ---------------------------------------------------------------------------
+// Composition masking — Layer 2.
+//
+// The committed composition quotient `q` is split into chunks (`q_0, q_1`) that
+// are committed separately. The *combined* opening `q(p)` is pinned by the trace
+// column openings, but each separately committed chunk carries one extra
+// witness-dependent degree of freedom that is not pinned — the residual leak.
+//
+// To mask it, sample an independent random secure polynomial `t` and commit
+// `q' = q + t` (equivalently the numerator `N' = N + v_H·t`, which still
+// vanishes on `H`, so the AIR is unchanged). The verifier opens `t(ζ)` and
+// checks `q'(ζ) - t(ζ)` against the trace-derived composition value.
+//
+// `t` MUST be committed and opened UNSPLIT (as one secure polynomial): the
+// verifier needs only the combined `t(ζ)` (and combined `t(x)` at query points),
+// never the split `t_0, t_1`. If the split halves of `t` were revealed, the
+// verifier could subtract them from `q'_0, q'_1` and recover the unmasked chunks,
+// defeating the mask. CANDIDATE: that this hides the chunk DOFs to a negligible
+// bound is the cryptographer-reviewed property, not established here.
+// ---------------------------------------------------------------------------
+
+/// Draws a composition randomizer `t`: a random secure polynomial of `log_size`,
+/// each of its four QM31 coordinate polynomials carrying `dimension` independent
+/// base-field coefficients (the rest zero).
+pub fn sample_composition_randomizer<B, R>(
+    log_size: u32,
+    dimension: usize,
+    rng: &mut R,
+) -> Result<SecureCirclePoly<B>, WitnessMaskError>
+where
+    B: PolyOps,
+    R: RngCore + CryptoRng + ?Sized,
+{
+    let coeff_count = 1usize << log_size;
+    if dimension > coeff_count {
+        return Err(WitnessMaskError::CompositionRandomizerDimensionTooLarge {
+            dimension,
+            coeff_count,
+        });
+    }
+    Ok(SecureCirclePoly(core::array::from_fn(|_| {
+        let coeffs: Col<B, BaseField> = (0..coeff_count)
+            .map(|i| {
+                if i < dimension {
+                    sample_base_field(rng)
+                } else {
+                    BaseField::zero()
+                }
+            })
+            .collect();
+        CircleCoefficients::new(coeffs)
+    })))
+}
+
+/// Returns the masked composition `q' = q + t`, added coordinate- and
+/// coefficient-wise. Both polynomials must share the same log size.
+pub fn add_composition_randomizer<B: PolyOps>(
+    composition: SecureCirclePoly<B>,
+    randomizer: &SecureCirclePoly<B>,
+) -> Result<SecureCirclePoly<B>, WitnessMaskError> {
+    if composition.log_size() != randomizer.log_size() {
+        return Err(WitnessMaskError::CompositionRandomizerLogSizeMismatch {
+            randomizer_log_size: randomizer.log_size(),
+            composition_log_size: composition.log_size(),
+        });
+    }
+    let composition = composition.into_coordinate_polys();
+    Ok(SecureCirclePoly(core::array::from_fn(|j| {
+        let q = &composition[j];
+        let t = &randomizer[j];
+        let coeffs: Col<B, BaseField> = (0..q.coeffs.len())
+            .map(|i| q.coeffs.at(i) + t.coeffs.at(i))
+            .collect();
+        CircleCoefficients::new(coeffs)
+    })))
+}
+
 /// Vanishing polynomial of the full trace domain `H = +-C + <G_n>`, evaluated at
 /// `point`: the product of the half-coset and conjugate-half-coset vanishings.
 fn full_trace_domain_vanishing<F>(trace_domain: CircleDomain, point: CirclePoint<F>) -> F
@@ -362,7 +446,7 @@ mod tests {
     use super::*;
     use crate::core::fields::m31::M31;
     use crate::core::fields::qm31::SecureField;
-    use crate::prover::backend::cpu::CpuBackend;
+    use crate::prover::backend::cpu::{CpuBackend, CpuCirclePoly};
 
     #[test]
     fn mask_preserves_trace_domain_and_randomizes_off_domain() {
@@ -432,5 +516,55 @@ mod tests {
                 required: 9,
             }
         );
+    }
+
+    #[test]
+    fn composition_randomizer_adds_at_point() {
+        let log_size = 6;
+        let q = SecureCirclePoly::<CpuBackend>(core::array::from_fn(|j| {
+            CpuCirclePoly::new(
+                (0..1u32 << log_size)
+                    .map(|i| BaseField::from_u32_unchecked(i + j as u32))
+                    .collect(),
+            )
+        }));
+        let mut rng = StdRng::seed_from_u64(7);
+        let t =
+            sample_composition_randomizer::<CpuBackend, _>(log_size, 1 << log_size, &mut rng).unwrap();
+
+        let zeta = CirclePoint::get_point(998877);
+        let q_at = q.eval_at_point(zeta);
+        let t_at = t.eval_at_point(zeta);
+        // q'(ζ) = q(ζ) + t(ζ): the verifier recovers q(ζ) = q'(ζ) - t(ζ).
+        let q_prime = add_composition_randomizer(q, &t).unwrap();
+        assert_eq!(q_prime.eval_at_point(zeta), q_at + t_at);
+    }
+
+    #[test]
+    fn composition_randomizer_rejects_oversized_dimension() {
+        let mut rng = StdRng::seed_from_u64(1);
+        assert!(matches!(
+            sample_composition_randomizer::<CpuBackend, _>(3, 9, &mut rng),
+            Err(WitnessMaskError::CompositionRandomizerDimensionTooLarge {
+                dimension: 9,
+                coeff_count: 8,
+            })
+        ));
+    }
+
+    #[test]
+    fn composition_randomizer_rejects_log_size_mismatch() {
+        let q = SecureCirclePoly::<CpuBackend>(core::array::from_fn(|_| {
+            CpuCirclePoly::new((0..1u32 << 6).map(BaseField::from_u32_unchecked).collect())
+        }));
+        let mut rng = StdRng::seed_from_u64(2);
+        let t = sample_composition_randomizer::<CpuBackend, _>(5, 1 << 5, &mut rng).unwrap();
+        assert!(matches!(
+            add_composition_randomizer(q, &t),
+            Err(WitnessMaskError::CompositionRandomizerLogSizeMismatch {
+                randomizer_log_size: 5,
+                composition_log_size: 6,
+            })
+        ));
     }
 }
