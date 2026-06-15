@@ -56,6 +56,64 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
         Some(value)
     }
 
+    /// Extracts the masked composition trace OODS evaluation `q'(ζ)` from the mask.
+    ///
+    /// Mirrors [`Self::extract_composition_oods_eval`] but reads the composition
+    /// chunk columns from the second-to-last sampled-values tree, because the last
+    /// tree holds the unsplit composition randomizer `t`.
+    #[cfg(feature = "statistical-zk")]
+    pub(crate) fn extract_composition_oods_eval_zk(
+        &self,
+        oods_point: CirclePoint<SecureField>,
+        max_log_degree_bound: u32,
+    ) -> Option<SecureField> {
+        let [.., left_and_right_composition_mask, _t_mask] = &**self.sampled_values else {
+            return None;
+        };
+        let left_and_right_coordinate_evals: [SecureField; 2 * SECURE_EXTENSION_DEGREE] =
+            left_and_right_composition_mask
+                .iter()
+                .map(|columns| {
+                    let &[eval] = &columns[..] else {
+                        return None;
+                    };
+                    Some(eval)
+                })
+                .collect::<Option<Vec<_>>>()?
+                .try_into()
+                .ok()?;
+
+        let (left_coordinate_evals, right_coordinate_evals) =
+            left_and_right_coordinate_evals.split_at(SECURE_EXTENSION_DEGREE);
+
+        let left_eval = SecureField::from_partial_evals(left_coordinate_evals.try_into().ok()?);
+        let right_eval = SecureField::from_partial_evals(right_coordinate_evals.try_into().ok()?);
+        let value = left_eval + oods_point.repeated_double(max_log_degree_bound - 1).x * right_eval;
+        Some(value)
+    }
+
+    /// Extracts the composition randomizer OODS evaluation `t(ζ)` from the mask.
+    ///
+    /// The randomizer is committed and opened unsplit as one secure polynomial:
+    /// its four coordinate columns each hold a single evaluation at `ζ`, combined
+    /// into the secure value `t(ζ)`.
+    #[cfg(feature = "statistical-zk")]
+    pub(crate) fn extract_t_oods_eval(&self) -> Option<SecureField> {
+        let t_mask = self.sampled_values.last()?;
+        let coordinate_evals: [SecureField; SECURE_EXTENSION_DEGREE] = t_mask
+            .iter()
+            .map(|columns| {
+                let &[eval] = &columns[..] else {
+                    return None;
+                };
+                Some(eval)
+            })
+            .collect::<Option<Vec<_>>>()?
+            .try_into()
+            .ok()?;
+        Some(SecureField::from_partial_evals(coordinate_evals))
+    }
+
     /// Returns the estimate size (in bytes) of the proof.
     pub fn size_estimate(&self) -> usize {
         SizeEstimate::size_estimate(self)

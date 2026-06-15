@@ -119,7 +119,7 @@ impl WitnessMaskConfig {
     /// from the real OODS/FRI opening counts. An `Ok` result asserts only a
     /// dimension inequality between declared numbers — it is NOT a leakage or
     /// zero-knowledge guarantee.
-    pub fn check_leakage_budget(&self, required: usize) -> Result<(), WitnessMaskError> {
+    pub const fn check_leakage_budget(&self, required: usize) -> Result<(), WitnessMaskError> {
         if self.randomizer_dimension < required || self.leakage_budget < required {
             return Err(WitnessMaskError::PublicLeakageBudgetExceeded {
                 randomizer_dimension: self.randomizer_dimension,

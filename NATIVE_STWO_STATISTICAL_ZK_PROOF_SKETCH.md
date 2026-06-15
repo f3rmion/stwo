@@ -249,10 +249,17 @@ in §6–§10 where they conflict. **This remains a candidate; certification sti
 
 - **Layer 0 (hiding/salted Merkle)** is assumed in §5 but is not implemented. The full construction
   requires it (auth paths otherwise leak through sibling hashes of unopened leaves).
-- **The prove/verify wiring** (`q' = q + t` inserted before the split; verifier `q'(ζ) − t(ζ)` check;
-  `t` committed) is not wired into the prover. The masking functions are standalone primitives. The
-  deployed prover currently commits the witness and the unmasked chunks in the clear — it is the
-  transparent path and provides NO zero-knowledge. The argument here is about the *design*.
+- **The composition wiring is now built** behind the `statistical-zk` feature (`prove_zk`/`verify_zk`):
+  `q' = q + t` is committed (chunks split), `t` is committed unsplit as a separate tree, and the check
+  is enforced. NOTE the implemented check is `q'(ζ)_eff − t(2ζ)` evaluated at the lifted effective
+  point, NOT the single-point `q'(ζ) − t(ζ)` of §2/§7 — `t` is opened at
+  `2ζ = ζ.repeated_double(COMPOSITION_LOG_SPLIT)` so it lands on the same effective point the split
+  chunks fold to. Lemma 2 below must be re-derived in the observed quantities
+  `{q'_left(ζ), q'_right(ζ), t(2ζ)}` (the cancellation still holds — combined `t` is the only
+  `t`-functional revealed — but the single-point framing is inaccurate as written).
+- **Still NOT built:** Layer-1 trace-column masking (the wired path masks the composition only, so it
+  is not yet witness-hiding on the trace), and **Layer 0 (hiding/salted Merkle)**. The runtime
+  leakage-budget check is also not yet invoked in `prove_zk`.
 
 ### B.1 The split multiplier never vanishes on the query domain (the §7 π-edge is closed)
 

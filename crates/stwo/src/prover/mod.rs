@@ -155,6 +155,159 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     })
 }
 
+/// Statistical zero-knowledge prover path.
+///
+/// Masks the committed composition quotient `q` by an independent random secure
+/// polynomial `t`: it commits the split halves of `q' = q + t` as the transparent
+/// path does, then commits `t` unsplit as a separate tree last. The verifier
+/// reconstructs `q'(ζ)` and `t(ζ)` from their openings and checks
+/// `q'(ζ) - t(ζ)` against the trace-derived composition value.
+///
+/// `randomizer_dimension` controls how many independent base-field coefficients
+/// each of `t`'s four coordinate polynomials carries. This path does not mask the
+/// trace columns.
+#[cfg(feature = "statistical-zk")]
+#[instrument(skip_all)]
+pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
+    components: &[&dyn ComponentProver<B>],
+    channel: &mut MC::C,
+    mut commitment_scheme: CommitmentSchemeProver<'_, B, MC>,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+    randomizer_dimension: usize,
+) -> Result<ExtendedStarkProof<MC::H>, ProvingError> {
+    use crate::prover::statistical_zk::{add_composition_randomizer, sample_composition_randomizer};
+
+    let include_all_preprocessed_columns = false;
+    let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
+        .polynomials
+        .len();
+    let component_provers = ComponentProvers {
+        components: components.to_vec(),
+        n_preprocessed_columns,
+    };
+    let trace = commitment_scheme.trace();
+
+    // Evaluate and commit on composition polynomial.
+    let random_coeff = channel.draw_secure_felt();
+
+    let span = span!(Level::INFO, "Composition", class = "Composition").entered();
+    let span1 = span!(
+        Level::INFO,
+        "Generation",
+        class = "CompositionPolynomialGeneration"
+    )
+    .entered();
+
+    let composition_poly = component_provers.compute_composition_polynomial(
+        random_coeff,
+        &trace,
+        commitment_scheme.twiddles,
+        commitment_scheme.config.fri_config.log_blowup_factor,
+    );
+    span1.exit();
+
+    // Draw the composition randomizer `t` and mask the composition: q' = q + t.
+    let composition_log_size = composition_poly.log_size();
+    let t = sample_composition_randomizer::<B, _>(composition_log_size, randomizer_dimension, rng)?;
+    let composition_poly = add_composition_randomizer(composition_poly, &t)?;
+
+    // Commit on the masked composition polynomial by splitting its coeffs to two polynomials of
+    // degree half the size of the original polynomial, and commit on each half separately.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let (left_comp_poly_half, right_comp_poly_half) = composition_poly.split_at_mid();
+
+    tree_builder.extend_polys(left_comp_poly_half.into_coordinate_polys());
+    tree_builder.extend_polys(right_comp_poly_half.into_coordinate_polys());
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Read the lifting size from the composition tree (the last tree committed so
+    // far): the global lifting must already pin every committed tree to this height
+    // so that the taller randomizer tree committed next does not introduce a
+    // per-tree fold mismatch in FRI decommitment.
+    let split_composition_log_size = commitment_scheme
+        .trees
+        .last()
+        .unwrap()
+        .commitment
+        .layers
+        .len() as u32
+        - 1;
+    let lifting_log_size =
+        try_get_lifting_log_size(&commitment_scheme.config, split_composition_log_size)?;
+    let max_log_degree_bound =
+        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+
+    // Fail closed unless the configured lifting already accommodates the unsplit
+    // randomizer tree (one log size above the split chunks). Without this, the
+    // committed trees would have mismatched heights and FRI decommitment positions
+    // would be inconsistent across trees.
+    let randomizer_lifting_log_size =
+        composition_log_size + commitment_scheme.config.fri_config.log_blowup_factor;
+    if lifting_log_size < randomizer_lifting_log_size {
+        Err(crate::core::pcs::utils::InvalidLiftingLogSizeError {
+            lifting_log_size,
+            min_log_size: randomizer_lifting_log_size,
+        })?;
+    }
+
+    // Commit on the composition randomizer `t` unsplit, as a separate tree committed last. Its
+    // four coordinate polynomials live at the full composition log size.
+    let mut t_tree_builder = commitment_scheme.tree_builder();
+    t_tree_builder.extend_polys(t.into_coordinate_polys());
+    t_tree_builder.commit(channel);
+
+    // Draw OODS point.
+    let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
+
+    // Get mask sample points relative to oods point.
+    let mut sample_points = component_provers.components().mask_points(
+        oods_point,
+        max_log_degree_bound,
+        include_all_preprocessed_columns,
+    );
+
+    // Add the composition polynomial mask points.
+    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    // Add the composition randomizer mask points. The randomizer lives one log
+    // size above the split composition chunks, so to open it at the same effective
+    // point the chunks fold to, its sample point is pre-folded by the split depth.
+    let randomizer_oods_point =
+        oods_point.repeated_double(crate::core::verifier::COMPOSITION_LOG_SPLIT);
+    sample_points.push(vec![vec![randomizer_oods_point]; SECURE_EXTENSION_DEGREE]);
+
+    // Prove the trace and composition OODS values, and retrieve them.
+    let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
+    let proof = StarkProof(commitment_scheme_proof.proof);
+    info!(proof_size_estimate = proof.size_estimate());
+
+    // Evaluate the masked composition polynomial at the OODS point and check that
+    // `q'(ζ) - t(ζ)` matches the trace OODS values. This is a sanity check.
+    let q_prime_at = proof
+        .extract_composition_oods_eval_zk(oods_point, max_log_degree_bound)
+        .ok_or(ProvingError::ConstraintsNotSatisfied)?;
+    let t_at = proof
+        .extract_t_oods_eval()
+        .ok_or(ProvingError::ConstraintsNotSatisfied)?;
+    if q_prime_at - t_at
+        != component_provers
+            .components()
+            .eval_composition_polynomial_at_point(
+                oods_point,
+                &proof.sampled_values,
+                random_coeff,
+                max_log_degree_bound,
+            )
+    {
+        return Err(ProvingError::ConstraintsNotSatisfied);
+    }
+
+    Ok(ExtendedStarkProof {
+        proof,
+        aux: commitment_scheme_proof.aux,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Error)]
 pub enum ProvingError {
     #[error("Constraints not satisfied.")]
@@ -163,4 +316,7 @@ pub enum ProvingError {
     InvalidLiftingLogSize(#[from] crate::core::pcs::utils::InvalidLiftingLogSizeError),
     #[error(transparent)]
     InvalidCanonicCosetLogSize(#[from] crate::core::poly::circle::InvalidCanonicCosetLogSize),
+    #[cfg(feature = "statistical-zk")]
+    #[error(transparent)]
+    WitnessMask(#[from] crate::prover::statistical_zk::WitnessMaskError),
 }

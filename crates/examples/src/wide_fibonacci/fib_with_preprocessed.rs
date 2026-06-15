@@ -179,6 +179,87 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_with_pp_prove_zk_with_blake() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use stwo::core::verifier::verify_zk;
+        use stwo::prover::prove_zk;
+
+        for log_n_instances in 4..=8 {
+            // The unsplit composition randomizer lives one log size above the split
+            // composition chunks at log_n + 1 + log_blowup, making it the tallest
+            // committed tree. Pin every tree to that lifting size so all committed
+            // trees share a height and FRI queries decommit uniformly. A non-empty
+            // preprocessed tree is required so its height tracks the lifting size.
+            let mut config = PcsConfig::default();
+            config.lifting_log_size =
+                Some(log_n_instances + 1 + config.fri_config.log_blowup_factor);
+            // Precompute twiddles covering the lifted domain.
+            let twiddles = SimdBackend::precompute_twiddles(
+                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                    .circle_domain()
+                    .half_coset,
+            );
+
+            // Setup protocol.
+            let prover_channel = &mut Blake2sM31Channel::default();
+            let mut commitment_scheme = CommitmentSchemeProver::<
+                SimdBackend,
+                Blake2sM31MerkleChannel,
+            >::new(config, &twiddles);
+
+            // Preprocessed trace.
+            let mut tree_builder = commitment_scheme.tree_builder();
+            let preprocessed_trace = generate_preprocessed_trace(log_n_instances);
+            tree_builder.extend_evals(vec![preprocessed_trace]);
+            tree_builder.commit(prover_channel);
+
+            // Trace.
+            let trace =
+                generate_trace::<FIB_SEQUENCE_LENGTH, _>(&generate_test_inputs(log_n_instances));
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(trace);
+            tree_builder.commit(prover_channel);
+
+            // Prove constraints with the composition randomizer active.
+            let component = WideFibWithPpComponent::new(
+                &mut TraceLocationAllocator::default(),
+                WideFibWithPpEval::<FIB_SEQUENCE_LENGTH> {
+                    log_n_rows: log_n_instances,
+                },
+                SecureField::zero(),
+            );
+
+            let mut rng = StdRng::seed_from_u64(0);
+            // The randomizer carries this many independent base-field coefficients
+            // per coordinate. It must fit the composition coefficient space
+            // (2^(log_n+1)); half that space is a nontrivial, always-valid choice.
+            let randomizer_dimension = 1 << log_n_instances;
+            let extended_proof = prove_zk::<SimdBackend, Blake2sM31MerkleChannel>(
+                &[&component],
+                prover_channel,
+                commitment_scheme,
+                &mut rng,
+                randomizer_dimension,
+            )
+            .unwrap();
+            let proof = extended_proof.proof;
+
+            // Verify.
+            let verifier_channel = &mut Blake2sM31Channel::default();
+            let commitment_scheme =
+                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+            // Retrieve the expected column sizes in each commitment interaction, from the AIR.
+            let sizes = component.trace_log_degree_bounds();
+            commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+            commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+            verify_zk(&[&component], verifier_channel, commitment_scheme, proof, false).unwrap();
+        }
+    }
+
     #[test_log::test]
     fn test_wide_fib_with_unused_pp_prove_with_blake() {
         for log_n_instances in 4..=8 {
