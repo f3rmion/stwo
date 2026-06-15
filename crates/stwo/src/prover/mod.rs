@@ -25,6 +25,8 @@ pub mod poly;
 pub mod secure_column;
 #[cfg(feature = "statistical-zk")]
 pub mod statistical_zk;
+#[cfg(all(test, feature = "statistical-zk"))]
+mod statistical_zk_rank_check;
 pub mod vcs;
 pub mod vcs_lifted;
 

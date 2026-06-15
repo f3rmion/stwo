@@ -235,3 +235,99 @@ facts for specific parameters — strong, falsifying evidence, but not the gener
   decomposition pitfall, §4 Lagrange/quotient correction, App. A permutation arguments).
 - Haböck, Levit, Papini, *Circle STARKs*, ePrint 2024/278.
 - Carmon, Goldberg, Haböck, Lerer, Lesokhin, *S-two Whitepaper*, ePrint 2026/532 (soundness only).
+
+---
+
+## Appendix B — Adversarial review: corrections, computational evidence, residual
+
+A multi-reviewer adversarial pass (independent proof attempts for GAP A and GAP B, an adversary
+tasked to break them, a numerical rank check, and a tie-breaker) refined this sketch. No fundamental
+break of the construction-as-designed was found. The corrections below supersede the looser statements
+in §6–§10 where they conflict. **This remains a candidate; certification still requires a cryptographer.**
+
+### B.0 Scope: two components are specified but NOT yet built
+
+- **Layer 0 (hiding/salted Merkle)** is assumed in §5 but is not implemented. The full construction
+  requires it (auth paths otherwise leak through sibling hashes of unopened leaves).
+- **The prove/verify wiring** (`q' = q + t` inserted before the split; verifier `q'(ζ) − t(ζ)` check;
+  `t` committed) is not wired into the prover. The masking functions are standalone primitives. The
+  deployed prover currently commits the witness and the unmasked chunks in the clear — it is the
+  transparent path and provides NO zero-knowledge. The argument here is about the *design*.
+
+### B.1 The split multiplier never vanishes on the query domain (the §7 π-edge is closed)
+
+The verifier's split multiplier is `M(p) = p.repeated_double(max_log_degree_bound − 1).x`, and
+composition query points live on `CanonicCoset(max_log_degree_bound + log_blowup_factor)`. On a canonic
+coset of log size `L`, `M(p) = 0` happens iff the doubling exponent equals `L − 1`. Here the exponent is
+`max_log_degree_bound − 1` and `L = max_log_degree_bound + log_blowup_factor`, so `M = 0` would require
+`log_blowup_factor = 0`. Since the blow-up factor is always `≥ 1`, **`M(p) ≠ 0` at every admissible
+query point** (proved closed-form, confirmed by exhaustive scan for `n = 4..7`). Hence Lemma 2's
+division by `M` is safe and the singular branch is never reached. (An earlier worry that `M = 0` occurs
+for a constant fraction of query points dropped the blow-up factor and was incorrect.)
+
+### B.2 Two conjugations — the OODS charge is `e`, but query conjugates do NOT collapse
+
+There are two distinct conjugations, and only one yields `f(p̄) = conj(f(p))`:
+- **Field/Frobenius conjugate**: gives the relation, so the Frobenius-conjugate opening is an
+  `F_q`-linear image of the original — its rows collapse, and each OODS opening is correctly charged as
+  `e = 4` base functionals (not `2e`). *Confirmed numerically: rank stays 4.*
+- **Circle/geometric conjugate `(x, −y)`**: a different point; its opening is independent. *Confirmed
+  numerically: rank rises.*
+
+Consequence (correcting the GAP-A "[R1] count distinct functionals" remark): geometric-conjugate
+**query** points do not coincide — their rows are independent (rank grows `1 → 2`). The only genuine
+query-rank collapse is at **self-conjugate points `y = 0`**, which canonic domains exclude (and OODS
+enforces `ζ.y ≠ conj(ζ.y)`). So the relevant admissibility condition is "no `y = 0` query point,"
+not "no conjugate-pair query."
+
+### B.3 Corrected leakage budget for `t` (secure column ⇒ charge `e` per opening)
+
+`t` is a *secure* polynomial: a query opening exposes all `e = 4` base coordinates, so query openings of
+`t` are charged `e·n_D`, not `n_D`; and `t` carries `4·h_t` base-field DOF (h_t per coordinate). The
+composition is OODS-sampled at `ζ` only, so `n_F^comp = 1`. Two requirements:
+- **reconstruction-resistance** (the decisive one): the verifier's `t`-openings must be strictly fewer
+  than `t`'s DOF, `4·h_t > e·(n_F^comp + n_D)`, else the verifier interpolates `t`, computes the public
+  split `(t_0, t_1) = split(t)`, and strips the mask `q_0 = q'_0 − t_0`;
+- **joint hiding**: `4·h_t ≥ dim R + dim S` where `R` = revealed `t`-functionals and `S` = the per-point
+  split-direction freedoms.
+
+The exact inequality must be **derived from real opening counts and enforced fail-closed** at wiring
+time (the existing `check_leakage_budget` is not yet called on `t`). The §3/§7 formula
+`h_t ≳ d·(e·n_F + n_D)` is safe but loose (it over-counts by mixing per-coordinate vs total and using
+`n_F = 2`).
+
+### B.4 LogUp division of labor
+
+`t` covers the LogUp constraint's contribution to the **composition quotient** (it is just more
+`C_k` in the same `N`). LogUp **auxiliary columns** (running-sum / fraction) are covered by Layer 1
+(they must be `ŵ = w + v_H·r` masked), not by `t`. If LogUp is discharged via a **GKR/sumcheck** path
+instead of in-composition constraints, that transcript is a **separate ZK surface** untouched by `t` or
+column masking and is outside this argument.
+
+### B.5 Computational evidence (numerical rank check)
+
+`crates/stwo/src/prover/statistical_zk_rank_check.rs` computes exact base-field ranks at concrete points,
+with negative controls (it can fail). At the tested parameters it establishes **non-identical
+degeneracy**:
+- Lemma 1: `E` reaches full row rank `e·n_F + n_D` at the budget; under-provisioning by one fails.
+- Lemma 2: `t` is under-determined at the conservative budget (positive coefficient nullspace);
+  over-opening `t` makes it reconstructible (negative control) — confirming the reconstruction defense.
+- The conjugate counting (B.2) and `M ≠ 0` on the real query domain (B.1).
+
+These are **computed facts for specific parameters and points** — evidence that the maps are not
+identically degenerate. They are **not** the genericity theorem over random challenges, nor all
+admissible configurations, nor the statistical-distance bound `ε`.
+
+### B.6 Updated residual for cryptographer review
+
+1. The **general non-degeneracy theorems** for `E` (GAP A) and the `R ⊕ S` map (GAP B): full rank at
+   *all* admissible OODS/query configurations, with the Schwartz–Zippel `ε` over the random challenges
+   (note query positions are uniform over the finite domain `D`, not over `F` — the query term is a
+   distinctness/non-`y=0` argument, not a field-size term).
+2. The **corrected, enforced budget** of B.3 (derive `h_t`, `h_col` from real counts; fail-closed).
+3. Build **Layer 0** (hiding Merkle) and the **prove/verify wiring**; confirm the **LogUp path**
+   (in-composition vs GKR).
+
+Overall: the adversarial pass moved GAP A and GAP B to **PROVED-MODULO their non-degeneracy
+assumptions, with those assumptions numerically confirmed at tested parameters and no fundamental break
+found** — a strengthened candidate, still pending the cryptographer's general theorems and `ε`.
