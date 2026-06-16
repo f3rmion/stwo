@@ -47,11 +47,23 @@ pub fn verify_ex<MC: MerkleChannel>(
         components: components.to_vec(),
         n_preprocessed_columns,
     };
-    let split_composition_log_degree_bound =
-        components.composition_log_degree_bound() - COMPOSITION_LOG_SPLIT;
+    // Split factor `k`: the composition is split into `2^k` chunks until each lands
+    // at the base trace (constraint / vanishing) domain, so `max_log_degree_bound`
+    // equals that domain — the degree the constraint quotient's vanishing is taken
+    // at (`evaluate_constraint_quotients_at_point`). `base` is the max committed
+    // non-preprocessed column (trace / interaction trees); the preprocessed tree 0,
+    // which may carry larger unused columns, is excluded.
+    // `k = composition_log_degree_bound - base` = `ceil(log2(constraint_degree))`.
+    let composition_log_degree_bound = components.composition_log_degree_bound();
+    // AIR-derived (degree bounds), identical to the prover and independent of
+    // lifting / blow-up / committed tree heights.
+    let base_trace_log_degree_bound = components.base_trace_log_degree_bound();
+    let composition_log_split = composition_log_degree_bound - base_trace_log_degree_bound;
+    let split_composition_log_degree_bound = composition_log_degree_bound - composition_log_split;
     tracing::info!(
-        "Split composition polynomial log degree bound: {}",
-        split_composition_log_degree_bound
+        "Split composition polynomial log degree bound: {} (split factor {})",
+        split_composition_log_degree_bound,
+        composition_log_split
     );
 
     // If `self.config.lifting_log_size` is None, the lifting size is the length of the split
@@ -77,10 +89,11 @@ pub fn verify_ex<MC: MerkleChannel>(
 
     let random_coeff = channel.draw_secure_felt();
 
-    // Read composition polynomial commitment.
+    // Read composition polynomial commitment (`2^k` chunks of
+    // `SECURE_EXTENSION_DEGREE` columns).
     commitment_scheme.commit(
         *proof.commitments.last().unwrap(),
-        &[max_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE],
+        &vec![max_log_degree_bound; (1 << composition_log_split) * SECURE_EXTENSION_DEGREE],
         channel,
     );
 
@@ -92,8 +105,11 @@ pub fn verify_ex<MC: MerkleChannel>(
         max_log_degree_bound,
         include_all_preprocessed_columns,
     );
-    // Add the composition polynomial mask points.
-    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    // Add the composition polynomial mask points (`2^k` chunks).
+    sample_points.push(vec![
+        vec![oods_point];
+        (1 << composition_log_split) * SECURE_EXTENSION_DEGREE
+    ]);
 
     let sample_points_by_column = sample_points.as_cols_ref().flatten();
     tracing::info!("Sampling {} columns.", sample_points_by_column.len());
@@ -103,7 +119,7 @@ pub fn verify_ex<MC: MerkleChannel>(
     );
 
     let composition_oods_eval = proof
-        .extract_composition_oods_eval(oods_point, max_log_degree_bound)
+        .extract_composition_oods_eval(oods_point, max_log_degree_bound, composition_log_split)
         .ok_or(VerificationError::InvalidStructure(
             std_shims::ToString::to_string(&"Unexpected sampled_values structure"),
         ))?;

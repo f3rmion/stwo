@@ -73,13 +73,23 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     );
     span1.exit();
 
-    // Commit on the Composition Polynomial by splitting its coeffs to two polynomialsof degree
-    // half the size of the original polynomial, and commit on each half separately.
-    let mut tree_builder = commitment_scheme.tree_builder();
-    let (left_comp_poly_half, right_comp_poly_half) = composition_poly.split_at_mid();
+    // Split factor `k`: split the composition into `2^k` chunks, each landing at the
+    // base trace (constraint) domain so every committed polynomial shares that degree
+    // bound. `base` is the max AIR-declared non-preprocessed column degree bound;
+    // preprocessed tree 0 (possibly larger unused columns) is excluded. Derived from
+    // the AIR (`column_log_sizes`), so it is identical on the verifier and unaffected
+    // by lifting/blow-up. `k = composition_log_degree_bound - base`.
+    let composition_log_degree_bound = composition_poly.log_size();
+    let base_trace_log_degree_bound = component_provers.components().base_trace_log_degree_bound();
+    let composition_log_split = composition_log_degree_bound - base_trace_log_degree_bound;
 
-    tree_builder.extend_polys(left_comp_poly_half.into_coordinate_polys());
-    tree_builder.extend_polys(right_comp_poly_half.into_coordinate_polys());
+    // Commit on the Composition Polynomial by splitting its coeffs into `2^k` chunks
+    // each of degree `2^base`, committed as `SECURE_EXTENSION_DEGREE` columns per
+    // chunk (chunk-major). With `k = 1` this is the left/right `split_at_mid`.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    for chunk in composition_poly.split_k(composition_log_split) {
+        tree_builder.extend_polys(chunk.into_coordinate_polys());
+    }
     tree_builder.commit(channel);
     span.exit();
 
@@ -124,8 +134,11 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
         include_all_preprocessed_columns,
     );
 
-    // Add the composition polynomial mask points.
-    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    // Add the composition polynomial mask points (`2^k` chunks).
+    sample_points.push(vec![
+        vec![oods_point];
+        (1 << composition_log_split) * SECURE_EXTENSION_DEGREE
+    ]);
 
     // Prove the trace and composition OODS values, and retrieve them.
     let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
@@ -135,7 +148,7 @@ pub fn prove_ex<B: BackendForChannel<MC>, MC: MerkleChannel>(
     // Evaluate composition polynomial at OODS point and check that it matches the trace OODS
     // values. This is a sanity check.
     if proof
-        .extract_composition_oods_eval(oods_point, max_log_degree_bound)
+        .extract_composition_oods_eval(oods_point, max_log_degree_bound, composition_log_split)
         .unwrap()
         != component_provers
             .components()

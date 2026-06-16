@@ -24,6 +24,28 @@ impl Components<'_> {
             .unwrap()
     }
 
+    /// Max declared trace column degree bound over the NON-preprocessed trees (the
+    /// constraint / trace domain). Used to derive the composition split factor
+    /// `k = composition_log_degree_bound - base`. Unlike [`Self::column_log_sizes`]
+    /// it ignores the preprocessed tree, so it tolerates unused preprocessed columns
+    /// (whose sizes are never set). Derived from the AIR, so prover and verifier
+    /// agree independently of lifting / blow-up.
+    pub fn base_trace_log_degree_bound(&self) -> u32 {
+        self.components
+            .iter()
+            .map(|component| {
+                let bounds = component.trace_log_degree_bounds();
+                bounds
+                    .iter()
+                    .skip(1)
+                    .flat_map(|cols| cols.iter().copied())
+                    .max()
+                    .unwrap()
+            })
+            .max()
+            .unwrap()
+    }
+
     pub fn mask_points(
         &self,
         point: CirclePoint<SecureField>,

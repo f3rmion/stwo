@@ -63,6 +63,25 @@ impl<B: PolyOps> SecureCirclePoly<B> {
         let right = [right0, right1, right2, right3];
         (Self(left), Self(right))
     }
+
+    /// Splits into `2^k` chunks by applying [`Self::split_at_mid`] `k` times.
+    ///
+    /// `k = 0` returns `self`; `k = 1` is `split_at_mid` (left then right). The
+    /// returned chunks, each of log size `self.log_size() - k`, recombine to the
+    /// original polynomial at a point `z` by a Horner fold from the deepest level
+    /// up: starting from the chunk evaluations, repeatedly combine adjacent pairs
+    /// `a + m_i·b` with `m_i = z.repeated_double(chunk_log_size - 1 + i).x` for
+    /// `i = 0..k` (where `chunk_log_size = self.log_size() - k`). See
+    /// [`super::ops::split_at_mid`] for the single-level identity.
+    pub fn split_k(self, k: u32) -> Vec<Self> {
+        if k == 0 {
+            return vec![self];
+        }
+        let (left, right) = self.split_at_mid();
+        let mut chunks = left.split_k(k - 1);
+        chunks.extend(right.split_k(k - 1));
+        chunks
+    }
 }
 
 impl<B: ColumnOps<BaseField>> Deref for SecureCirclePoly<B> {
@@ -176,5 +195,42 @@ mod tests {
 
         assert_eq!(left.log_size(), log_size - 1);
         assert_eq!(right.log_size(), log_size - 1);
+    }
+
+    #[test]
+    fn test_secure_circle_poly_split_k_recombines() {
+        use crate::core::proof::recombine_split_evals;
+
+        let log_size = 10;
+        let make = || {
+            SecureCirclePoly(std::array::from_fn(|i| {
+                CpuCirclePoly::new(
+                    (0..1 << log_size)
+                        .map(|x| {
+                            BaseField::from_u32_unchecked(x) + BaseField::from_u32_unchecked(i as u32)
+                        })
+                        .collect(),
+                )
+            }))
+        };
+        let z = CirclePoint::get_point(21903);
+        let expected = make().eval_at_point(z);
+
+        // k = 0..=3: 2^k chunks at log_size - k recombine to the original eval, and
+        // k = 1 matches split_at_mid's single-multiplier identity.
+        for k in 0..=3u32 {
+            let chunks = make().split_k(k);
+            assert_eq!(chunks.len(), 1 << k);
+            for c in &chunks {
+                assert_eq!(c.log_size(), log_size - k);
+            }
+            let evals: Vec<_> = chunks.iter().map(|c| c.eval_at_point(z)).collect();
+            let chunk_log_degree_bound = log_size - k;
+            assert_eq!(
+                recombine_split_evals(&evals, z, chunk_log_degree_bound, k),
+                expected,
+                "split_k recombination must reproduce the original eval (k={k})"
+            );
+        }
     }
 }
