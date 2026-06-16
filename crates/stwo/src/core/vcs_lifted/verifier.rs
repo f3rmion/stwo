@@ -60,7 +60,16 @@ pub struct MerkleVerifierLifted<H: MerkleHasherLifted> {
 impl<H: MerkleHasherLifted> MerkleVerifierLifted<H> {
     pub fn new(root: H::Hash, column_log_sizes: Vec<u32>, lifting_log_size: Option<u32>) -> Self {
         let max_column_log_size = column_log_sizes.iter().copied().max().unwrap_or_default();
-        let height = lifting_log_size.unwrap_or(max_column_log_size);
+        // A commitment with no columns is a single constant node (the prover does not
+        // build a lifted tree for it), so it has height 0 regardless of any forced
+        // lifting — otherwise the verifier would expect a lifted fold the prover never
+        // produced. Without this, an empty tree under a forced lifting (e.g. an empty
+        // preprocessed trace in the statistical-ZK path) fails decommitment.
+        let height = if column_log_sizes.is_empty() {
+            0
+        } else {
+            lifting_log_size.unwrap_or(max_column_log_size)
+        };
         assert!(
             max_column_log_size <= height,
             "The lifting log size is smaller than the largest column."

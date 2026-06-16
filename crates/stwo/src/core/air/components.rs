@@ -46,6 +46,21 @@ impl Components<'_> {
             .unwrap()
     }
 
+    /// Like [`Self::base_trace_log_degree_bound`] but SALT-AWARE: the statistical-ZK
+    /// composition split factor. The masked trace columns are committed at an
+    /// enlarged geometry and the trees carry leaf-size hiding-Merkle salt columns at
+    /// the composition bound, so the declared trace degree bounds are inflated; the
+    /// split must instead land the chunks at the CONSTRAINT trace domain
+    /// ([`Component::constraint_trace_log_size`], which excludes the salt).
+    #[cfg(feature = "statistical-zk")]
+    pub fn base_constraint_trace_log_degree_bound(&self) -> u32 {
+        self.components
+            .iter()
+            .map(|component| component.constraint_trace_log_size())
+            .max()
+            .unwrap()
+    }
+
     pub fn mask_points(
         &self,
         point: CirclePoint<SecureField>,

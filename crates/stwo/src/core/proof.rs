@@ -89,41 +89,46 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
 
     /// Extracts the masked composition trace OODS evaluation `q'(ζ)` from the mask.
     ///
-    /// Mirrors [`Self::extract_composition_oods_eval`] but reads the composition
-    /// chunk columns from the second-to-last sampled-values tree, because the last
-    /// tree holds the unsplit composition randomizer `t`.
+    /// Mirrors [`Self::extract_composition_oods_eval`] (same `2^composition_log_split`
+    /// chunk recombination) but reads the chunk columns from the SECOND-TO-LAST
+    /// sampled-values tree — the last tree holds the unsplit composition randomizer
+    /// `t` — and skips that tree's trailing Layer-0 salt column. `max_log_degree_bound`
+    /// is the lifted degree bound (the forced randomizer lifting), so the recombination
+    /// runs in the lifted frame, matching `t` opened at `repeated_double(k)`.
     #[cfg(feature = "statistical-zk")]
     pub(crate) fn extract_composition_oods_eval_zk(
         &self,
         oods_point: CirclePoint<SecureField>,
         max_log_degree_bound: u32,
+        composition_log_split: u32,
     ) -> Option<SecureField> {
-        let [.., left_and_right_composition_mask, _t_mask] = &**self.sampled_values else {
+        let [.., composition_mask, _t_mask] = &**self.sampled_values else {
             return None;
         };
+        let n_cols = (1usize << composition_log_split) * SECURE_EXTENSION_DEGREE;
         // The composition tree carries a trailing Layer-0 salt column with no OODS
-        // sample; take only the split-chunk coordinate columns.
-        let left_and_right_coordinate_evals: [SecureField; 2 * SECURE_EXTENSION_DEGREE] =
-            left_and_right_composition_mask
-                .iter()
-                .take(2 * SECURE_EXTENSION_DEGREE)
-                .map(|columns| {
-                    let &[eval] = &columns[..] else {
-                        return None;
-                    };
-                    Some(eval)
-                })
-                .collect::<Option<Vec<_>>>()?
-                .try_into()
-                .ok()?;
-
-        let (left_coordinate_evals, right_coordinate_evals) =
-            left_and_right_coordinate_evals.split_at(SECURE_EXTENSION_DEGREE);
-
-        let left_eval = SecureField::from_partial_evals(left_coordinate_evals.try_into().ok()?);
-        let right_eval = SecureField::from_partial_evals(right_coordinate_evals.try_into().ok()?);
-        let value = left_eval + oods_point.repeated_double(max_log_degree_bound - 1).x * right_eval;
-        Some(value)
+        // sample; take only the `2^k` split-chunk coordinate columns.
+        let coord_evals = composition_mask
+            .iter()
+            .take(n_cols)
+            .map(|columns| match &columns[..] {
+                &[eval] => Some(eval),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if coord_evals.len() != n_cols {
+            return None;
+        }
+        let chunk_evals: Vec<SecureField> = coord_evals
+            .chunks(SECURE_EXTENSION_DEGREE)
+            .map(|coords| SecureField::from_partial_evals(coords.try_into().unwrap()))
+            .collect();
+        Some(recombine_split_evals(
+            &chunk_evals,
+            oods_point,
+            max_log_degree_bound,
+            composition_log_split,
+        ))
     }
 
     /// Extracts the composition randomizer OODS evaluation `t(ζ)` from the mask.
