@@ -306,6 +306,20 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
     t_tree_builder.extend_polys(vec![sample_salt_column::<B, _>(max_log_degree_bound, rng)]);
     t_tree_builder.commit(channel);
 
+    // Bind the public LogUp boundary `claimed_sum` into the transcript BEFORE drawing
+    // the OODS point (statistical-ZK soundness fix A_fs-1): otherwise a malicious
+    // prover could pick `claimed_sum` after seeing `ζ` to satisfy the OODS check for
+    // an invalid trace. The verifier mirrors this; the application must additionally
+    // check the bound value against its expected total (e.g. `0` for a balanced
+    // lookup, via `assert_lookup_balanced`).
+    let claimed_sum: SecureField = component_provers
+        .components()
+        .components
+        .iter()
+        .map(|c| c.claimed_sum())
+        .sum();
+    channel.mix_felts(&[claimed_sum]);
+
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
 

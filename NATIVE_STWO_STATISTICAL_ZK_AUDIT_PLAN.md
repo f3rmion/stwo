@@ -244,7 +244,7 @@ explicitly disallowed** — this line is the cryptographer's signature.
 | A_snd-7 | A | mask degree headroom encodes out-of-AIR value | obligation O-A3 |
 | A_snd-8 | A | declare non-empty tree as column-less | obligation O-A4 |
 | A_snd-9 | A | lifted column low-degree at lift but not at true bound | obligation O-A5 |
-| **A_fs-1** | **A** | **unbound `claimed_sum` → adaptive forgery (nonzero variant)** | **OPEN — O-A6, live finding** |
+| **A_fs-1** | **A** | **unbound `claimed_sum` → adaptive forgery** | **PROTOCOL FIX LANDED** — `claimed_sum` now mixed into the FS transcript before challenges (`Component::claimed_sum` + `mix_felts` in prove_zk/verify_zk); the app-level check (vector 2 below) remains the integration's |
 | A_fs-2 | A | absorption-order / FS binding | obligation O-A6 |
 | A_zk-1 | B | `E` identically rank-deficient (GAP A) | obligation O-B2 |
 | A_zk-2 | B | `t` over-determined / reconstruction (GAP B, `k`-aware) | obligation O-B3 |
@@ -259,6 +259,10 @@ explicitly disallowed** — this line is the cryptographer's signature.
   parameters, the trust base. Output: this document, ratified.
 - **G1 — soundness reductions (A).** O-A1, O-A4, O-A5, O-A6 written and peer-reviewed. **Hard gate:**
   A_fs-1 (`claimed_sum`) resolved in code (balanced-only OR channel-bound) before any "sound" claim.
+  *Status:* the protocol half is done — `claimed_sum` is channel-bound (mixed before challenges) — so
+  the adaptive vector is closed; the application half (verifier checks the bound value against the
+  expected total; `assert_lookup_balanced` for the balanced case) is the dark-pool integration's and is
+  the remaining piece of this gate.
 - **G2 — machine-checked algebra (Lean).** The Tier-1 theorems of §8 — `T1` recombination identity,
   `T2` reduced-vanishing cancellation, `T3` per-level multiplier non-vanishing, `T4` on-`H` vanishing —
   proved in Lean against the trust-base axioms `Ax1–Ax3`. **Hard gate:** no soundness sign-off without

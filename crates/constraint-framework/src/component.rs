@@ -350,6 +350,10 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         self.preprocessed_column_indices.clone()
     }
 
+    fn claimed_sum(&self) -> SecureField {
+        self.claimed_sum
+    }
+
     fn evaluate_constraint_quotients_at_point(
         &self,
         point: CirclePoint<SecureField>,

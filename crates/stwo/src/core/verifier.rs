@@ -237,6 +237,13 @@ pub fn verify_zk<MC: MerkleChannel>(
     t_sizes.push(max_log_degree_bound);
     commitment_scheme.commit(*proof.commitments.last().unwrap(), &t_sizes, channel);
 
+    // Bind the public LogUp boundary `claimed_sum` into the transcript BEFORE drawing
+    // the OODS point, mirroring the prover (statistical-ZK soundness fix A_fs-1).
+    // `claimed_sum` here comes from the verifier-constructed components (the public
+    // statement); the application must check it against its expected total.
+    let claimed_sum: SecureField = components.components.iter().map(|c| c.claimed_sum()).sum();
+    channel.mix_felts(&[claimed_sum]);
+
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
     // Get mask sample points relative to oods point.

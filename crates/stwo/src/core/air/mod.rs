@@ -66,4 +66,15 @@ pub trait Component {
         evaluation_accumulator: &mut PointEvaluationAccumulator,
         max_log_degree_bound: u32,
     );
+
+    /// The component's public LogUp boundary sum (`claimed_sum`). It is a public
+    /// input the verifier must bind into the Fiat–Shamir transcript before drawing
+    /// challenges and check against the application's expected total; an unbound,
+    /// prover-chosen `claimed_sum` lets a malicious prover prove a false lookup total
+    /// (statistical-ZK soundness finding A_fs-1). Defaults to `0` for components with
+    /// no lookup argument.
+    fn claimed_sum(&self) -> SecureField {
+        use num_traits::Zero;
+        SecureField::zero()
+    }
 }
