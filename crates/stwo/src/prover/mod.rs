@@ -176,8 +176,23 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
     randomizer_dimension: usize,
 ) -> Result<ExtendedStarkProof<MC::H>, ProvingError> {
     use crate::prover::statistical_zk::{
-        add_composition_randomizer, sample_composition_randomizer, sample_salt_column,
+        add_composition_randomizer, required_composition_randomizer_dimension,
+        sample_composition_randomizer, sample_salt_column, WitnessMaskError,
     };
+
+    // Fail closed if the composition randomizer `t` is below the reconstruction-
+    // resistance budget derived from the real opening counts: the composition is
+    // OODS-sampled at ζ only (n_F^comp = 1) and queried at n_D positions, so
+    // `h_t` must exceed `n_F^comp + n_D` (equivalently `4·h_t > e·(n_F^comp + n_D)`)
+    // or the verifier could interpolate `t`, split it, and strip the mask.
+    let required_t_dimension =
+        required_composition_randomizer_dimension(1, commitment_scheme.config.fri_config.n_queries);
+    if randomizer_dimension < required_t_dimension {
+        Err(WitnessMaskError::CompositionRandomizerBudgetTooSmall {
+            dimension: randomizer_dimension,
+            required: required_t_dimension,
+        })?;
+    }
 
     let include_all_preprocessed_columns = false;
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]

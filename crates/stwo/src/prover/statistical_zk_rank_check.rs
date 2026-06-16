@@ -585,4 +585,68 @@ mod tests {
              excluded because the blow-up factor is always >= 1"
         );
     }
+
+    // ----- Part D: rank checks at DEPLOYED-scale parameters. -----
+
+    #[test]
+    fn deployed_scale_lemma1_full_rank_and_lemma2_underdetermined() {
+        // Plonk-scale opening counts: n_queries = 64 (the zk_config value), an
+        // interaction column charged at n_F = 2 OODS points, the composition charged
+        // at n_F^comp = 1. Budgets are the ENFORCED ones: h_col = e·n_F + n_D and
+        // h_t = n_F^comp + n_D + 1. This turns the enforced budget formulas into
+        // computed rank facts at the real deployed scale.
+        let trace_log_size = 6;
+        let n_d = 64usize;
+
+        // 64 distinct, non-conjugate query points on the evaluation domain.
+        let d_domain = CanonicCoset::new(trace_log_size + 1).circle_domain();
+        let query_points: Vec<CirclePoint<BaseField>> =
+            (0..n_d).map(|i| d_domain.at(2 * i + 1)).collect();
+
+        // Lemma 1: column-randomizer map E reaches full row rank at h_col = e·n_F+n_D.
+        let oods = oods_pair(trace_log_size, 13579);
+        let n_f = oods.len(); // 2
+        let h_col = 4 * n_f + n_d; // e·n_F + n_D
+        let e = build_column_eval_matrix(h_col, &oods, &query_points);
+        let rows = 4 * n_f + n_d;
+        let rank_e = m31_matrix_rank(&e);
+        println!("[deployed Lemma1] e·n_F+n_D = {rows}, h_col = {h_col}, rank(E) = {rank_e}");
+        assert_eq!(rank_e, rows, "E full row rank at the deployed column budget");
+
+        // Lemma 2: at h_t = n_F^comp + n_D + 1 (the enforced reconstruction-resistance
+        // budget) t stays under-determined: #openings < 4·h_t, nullspace > 0.
+        let comp_oods = CirclePoint::<SecureField>::get_point(24680); // ζ, n_F^comp = 1
+        let h_t = 1 + n_d + 1; // 66
+        let mut revealed: Vec<CirclePoint<SecureField>> = vec![comp_oods];
+        revealed.extend(query_points.iter().map(|&x| lift(x)));
+        let map = build_t_map(h_t, &revealed);
+        let n_openings = 4 * revealed.len(); // 4·65 = 260
+        let n_coeffs = 4 * h_t; // 4·66 = 264
+        let rank_t = m31_matrix_rank(&map);
+        println!(
+            "[deployed Lemma2] h_t = {h_t}, #openings = {n_openings}, 4·h_t = {n_coeffs}, \
+             rank(T) = {rank_t}, nullspace = {}",
+            n_coeffs - rank_t
+        );
+        assert_eq!(rank_t, n_openings, "t openings jointly independent at the deployed budget");
+        assert!(
+            n_openings < n_coeffs,
+            "t under-determined at the enforced reconstruction-resistance budget"
+        );
+
+        // Negative control at the deployed scale: one below the budget (h_t = n_D+1)
+        // makes #openings == 4·h_t, collapsing the nullspace — t reconstructible.
+        let h_t_short = n_d + 1; // 65 -> 4·65 = 260 == #openings
+        let map_short = build_t_map(h_t_short, &revealed);
+        let rank_short = m31_matrix_rank(&map_short);
+        println!(
+            "[deployed Lemma2 NEGATIVE] h_t = {h_t_short}, 4·h_t = {}, rank = {rank_short}",
+            4 * h_t_short
+        );
+        assert_eq!(
+            rank_short,
+            4 * h_t_short,
+            "one below budget: t attains full column rank (reconstructible)"
+        );
+    }
 }

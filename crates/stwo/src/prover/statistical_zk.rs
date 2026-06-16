@@ -39,11 +39,37 @@ use thiserror::Error;
 use crate::core::circle::CirclePoint;
 use crate::core::constraints::coset_vanishing;
 use crate::core::fields::m31::{BaseField, P as M31_MODULUS};
+use crate::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 use crate::core::fields::ExtensionOf;
 use crate::core::poly::circle::{CanonicCoset, CircleDomain};
 use crate::prover::backend::{Col, Column};
 use crate::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps, SecureCirclePoly};
 use crate::prover::poly::BitReversedOrder;
+
+/// Required column-randomizer dimension derived from REAL opening counts:
+/// `e·n_F + n_D`, where `e = SECURE_EXTENSION_DEGREE` (a secure OODS opening
+/// charges `e` base functionals) and each FRI query charges one. A column mask
+/// must carry at least this many free coefficients for its revealed openings to
+/// be (candidate) blinded.
+pub const fn required_column_randomizer_dimension(n_oods: usize, n_queries: usize) -> usize {
+    SECURE_EXTENSION_DEGREE * n_oods + n_queries
+}
+
+/// Minimum composition-randomizer (`t`) dimension for RECONSTRUCTION-RESISTANCE.
+///
+/// `t` is a secure polynomial: every revealed opening (OODS and each query) is a
+/// full `F` value charging `e` base functionals, so the verifier sees
+/// `e·(n_F^comp + n_D)` base functionals of `t`. For `t` to remain
+/// under-determined (un-reconstructible) its free base-field coefficients
+/// `e·h_t` must STRICTLY exceed that: `e·h_t > e·(n_F^comp + n_D)`, i.e.
+/// `h_t > n_F^comp + n_D`. Below this the verifier interpolates `t`, splits it
+/// publicly, and strips the mask. Returns the minimum admissible `h_t`.
+pub const fn required_composition_randomizer_dimension(
+    n_oods_comp: usize,
+    n_queries: usize,
+) -> usize {
+    n_oods_comp + n_queries + 1
+}
 
 /// Per-column parameters for Layer-1 witness masking.
 ///
@@ -241,6 +267,8 @@ pub enum WitnessMaskError {
         randomizer_log_size: u32,
         composition_log_size: u32,
     },
+    #[error("composition randomizer dimension {dimension} below reconstruction-resistance budget {required} (4·h_t must exceed e·(n_F^comp + n_D))")]
+    CompositionRandomizerBudgetTooSmall { dimension: usize, required: usize },
 }
 
 /// Masks a witness column: returns `ŵ = w + v_H · r`.
@@ -605,5 +633,15 @@ mod tests {
         assert_eq!(a.len(), 1 << 4);
         assert_ne!(a, b, "independent salt draws must differ");
         assert!(a.iter().any(|v| !v.is_zero()), "salt must not be all-zero");
+    }
+
+    #[test]
+    fn leakage_budget_formulas_match_real_opening_counts() {
+        // Column randomizer: e·n_F + n_D (e = 4).
+        assert_eq!(required_column_randomizer_dimension(1, 64), 4 + 64);
+        assert_eq!(required_column_randomizer_dimension(2, 30), 4 * 2 + 30);
+        // Composition randomizer: h_t > n_F^comp + n_D, i.e. n_F^comp + n_D + 1.
+        assert_eq!(required_composition_randomizer_dimension(1, 64), 66);
+        assert_eq!(required_composition_randomizer_dimension(1, 3), 5);
     }
 }

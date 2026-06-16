@@ -150,6 +150,20 @@ pub fn verify_zk<MC: MerkleChannel>(
         split_composition_log_degree_bound
     );
 
+    // Fail closed if the committed composition-randomizer (`t`) tree is too small
+    // to even permit a reconstruction-resistant `t` for the real opening counts:
+    // `t`'s coefficient space must exceed `n_F^comp + n_D` (composition OODS-sampled
+    // at ζ only, so n_F^comp = 1). This is a necessary PUBLIC-PARAMETER condition;
+    // the prover is responsible for actually randomizing `t` to this budget
+    // (enforced in prove_zk). Mirrors required_composition_randomizer_dimension.
+    let required_t_dimension = 1 + commitment_scheme.config.fri_config.n_queries + 1;
+    let t_coefficient_space = 1usize << (split_composition_log_degree_bound + COMPOSITION_LOG_SPLIT);
+    if t_coefficient_space < required_t_dimension {
+        return Err(VerificationError::InvalidStructure(std_shims::ToString::to_string(
+            &"composition randomizer tree too small for reconstruction-resistance",
+        )));
+    }
+
     // The global lifting pins every committed tree to the height of the tallest
     // tree, the unsplit randomizer at one log size above the split composition
     // chunks. `max_log_degree_bound` follows that lifting (matching the prover), so

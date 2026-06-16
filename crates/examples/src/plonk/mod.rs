@@ -728,12 +728,16 @@ mod zk_tests {
 
     #[test]
     fn test_simd_plonk_prove_zk() {
-        for log_n_rows in 5..=7 {
+        // log_n_rows starts at 6: with n_queries = 64 the composition randomizer `t`
+        // needs dimension > n_F^comp + n_D = 65 for reconstruction-resistance, which
+        // requires a composition coefficient space 2^(log_n_rows + 1) >= 66, i.e.
+        // log_n_rows >= 6. (n = 5 gives only 2^6 = 64 < 66 — too small to hide `t`.)
+        for log_n_rows in 6..=7 {
             let config = zk_config(log_n_rows);
             let mut rng = StdRng::seed_from_u64(2024);
-            // 64 over-provisions the randomizer; for these sizes it fits the
-            // composition coefficient space 2^(log_n_rows + 1).
-            let randomizer_dimension = 64;
+            // Above the reconstruction-resistance budget (n_F^comp + n_D + 1 = 66)
+            // and within the composition coefficient space 2^(log_n_rows + 1).
+            let randomizer_dimension = 128;
 
             let (component, extended_proof) =
                 prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng, randomizer_dimension);
@@ -751,7 +755,8 @@ mod zk_tests {
     fn test_plonk_prove_zk_randomization_smoke() {
         let log_n_rows = 6;
         let config = zk_config(log_n_rows);
-        let randomizer_dimension = 64;
+        // Above the reconstruction-resistance budget (n_F^comp + n_D + 1 = 66).
+        let randomizer_dimension = 128;
 
         let mut rng_a = StdRng::seed_from_u64(1);
         let (component_a, proof_a) =
@@ -782,6 +787,19 @@ mod zk_tests {
         // Both proofs must verify under the same redraw protocol.
         verify_plonk_zk(&component_a, proof_a.proof, config);
         verify_plonk_zk(&component_b, proof_b.proof, config);
+    }
+
+    /// prove_zk fails closed when the composition randomizer is below the
+    /// reconstruction-resistance budget (n_F^comp + n_D + 1 = 66 for n_queries=64):
+    /// a too-small `t` would be reconstructible and the mask strippable.
+    #[test]
+    #[should_panic(expected = "CompositionRandomizerBudgetTooSmall")]
+    fn test_plonk_prove_zk_rejects_undersized_randomizer() {
+        let log_n_rows = 6;
+        let config = zk_config(log_n_rows);
+        let mut rng = StdRng::seed_from_u64(7);
+        // 10 < 66 ⇒ prove_zk must reject (the harness unwraps the error).
+        let _ = prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng, 10);
     }
 
     /// Layer-1 trace masking with the LogUp interaction columns LIFTED (not yet
