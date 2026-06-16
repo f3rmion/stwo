@@ -446,7 +446,55 @@ The §3/§7 figure `h_t ≳ d·(e·n_F + n_D)` is safe but loose. This budget is
 implemented quantities, and that the `2ζ` opening preserves the §7 cancellation. The **joint** statement
 over all revealed points `{ζ} ∪ {x_j}` — that `t_left(ζ), t_right(ζ)` are jointly uniform under the
 pinned combinations, with its Schwartz–Zippel `ε` — remains **[GAP B]**, unchanged. The numerical rank
-check (B.5) confirms non-identical degeneracy at tested parameters only, not the general theorem. The
-wired path masks the **composition only**: Layer-1 trace masking and Layer-0 salted Merkle are not
-built, so this path is **not yet witness-hiding on the trace**. Candidate until the cryptographer
-certifies GAP B and the budget is enforced.
+check (B.5) confirms non-identical degeneracy at tested parameters only, not the general theorem.
+Layer-1 trace masking, Layer-0 salted Merkle, and the enforced budget (B.3) are now wired (see B.0), so
+the trace is mechanism-complete witness-hidden; the residual is GAP A / GAP B and the cryptographer's
+final `ε`. Candidate until that certificate exists.
+
+### B.8 LogUp multiplicity hiding — division of labor and the residual public channels
+
+The LogUp private witness is the **multiplicity column** (`mult`). This subsection shows which layer
+hides it and isolates the two multiplicity-dependent quantities that the masking layers do **not** cover.
+
+**The multiplicity column is a masked trace column.** `mult` is committed as an ordinary base-trace
+column (`ŵ = w + v_H·r`, Lemma 1), so its OODS and FRI-query openings are blinded exactly like any other
+witness column — there is nothing LogUp-specific about hiding the column *openings*. Likewise the LogUp
+**interaction** (cumulative-sum) columns are Layer-1 masked (§B.4: the auxiliary columns ride Layer 1,
+not `t`). So every opening that depends on `mult` is covered by L0/L1/L2.
+
+**Enumeration of the public artifacts.** Going through the verifier's entire view (§3): Merkle roots
+(L0, salted), column OODS/query openings of `mult` and the interaction columns (L1), composition `q'` and
+`t` openings (L2), FRI layers (L3, deterministic images of the above), and the lookup challenge (public
+Fiat–Shamir randomness). Exactly **two** verifier-visible quantities are functions of the multiplicity
+*values* yet are not openings, so no masking layer touches them:
+
+1. **`claimed_sum`** — the public LogUp boundary scalar. It equals `Σ_i (per-row fraction)`, a fixed
+   linear functional of the multiplicities evaluated at the lookup challenge. A witness-dependent
+   `claimed_sum` is therefore a public, partial readout of `mult`. (The interaction column's
+   `cumsum_shift` is `claimed_sum / 2ⁿ`, so the cumulative-sum geometry's only multiplicity dependence is
+   mediated by this same scalar — not a separate channel.) The fix is the **balanced** requirement: a
+   balanced argument has `claimed_sum = 0` for *every* witness, so the scalar is a witness-independent
+   constant and carries no information. Enforced opt-in by `assert_lookup_balanced` — a **prover-side
+   precondition the dark-pool integration must enforce**; the example PLONK harness does not call it
+   (fibonacci-PLONK is not a dark-pool circuit). A `claimed_sum` instead pinned by the *public statement*
+   (the state-machine pattern) is also safe, but **only if mixed into the Fiat–Shamir transcript before
+   the challenges are drawn** — the PLONK ZK path does NOT bind `claimed_sum` into the channel today, so
+   the nonzero variant would also be *unsound* there. The dark-pool circuits take the stricter,
+   wired-safe `= 0`.
+
+2. **Committed geometry** — row count `2ⁿ`, number of interaction columns, the per-column
+   log-degree bounds. These are derived symbolically from the AIR (the relation/`finalize_logup_in_pairs`
+   structure), **not** from the multiplicity values, so they leak nothing **provided the circuit pads to a
+   fixed power-of-two and a fixed relation/column count independent of how many real lookups occur**
+   (fixed padded geometry). For a fixed-shape dark-pool AIR this holds by construction.
+
+**Conclusion.** Multiplicity hiding reduces to: (column + interaction openings) ← Layer 1; (everything
+else that depends on `mult`) ← `{claimed_sum = 0, fixed padded geometry}`. Nothing outside those two is
+multiplicity-specific. CANDIDATE, same caveat as the rest: the adequacy of the L1 blinding is GAP A; this
+subsection only fixes the *non-masking* residuals and shows they are exactly two.
+
+**Evidence.** `test_claimed_sum_leaks_multiplicities_unless_balanced` (plonk `zk_tests`) is a
+negative-control demonstration: perturbing a single multiplicity changes `claimed_sum` (so an unbalanced
+value separates witnesses), and the balanced check rejects any nonzero value. The fibonacci-PLONK harness
+is itself **unbalanced** (its wire chain does not close), which is why it is a valid leak fixture but not
+a dark-pool circuit.

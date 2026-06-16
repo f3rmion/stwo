@@ -39,7 +39,7 @@ use thiserror::Error;
 use crate::core::circle::CirclePoint;
 use crate::core::constraints::coset_vanishing;
 use crate::core::fields::m31::{BaseField, P as M31_MODULUS};
-use crate::core::fields::qm31::SECURE_EXTENSION_DEGREE;
+use crate::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use crate::core::fields::ExtensionOf;
 use crate::core::poly::circle::{CanonicCoset, CircleDomain};
 use crate::prover::backend::{Col, Column};
@@ -69,6 +69,24 @@ pub const fn required_composition_randomizer_dimension(
     n_queries: usize,
 ) -> usize {
     n_oods_comp + n_queries + 1
+}
+
+/// Fail-closed check that a LogUp component is BALANCED (`claimed_sum == 0`).
+///
+/// The private LogUp multiplicities ride in masked trace columns (Layer 1), so
+/// their openings are blinded like any other witness column. The one
+/// multiplicity-dependent quantity NOT covered by column/composition masking is
+/// the public `claimed_sum`: it equals a fixed linear functional of the
+/// multiplicities at the lookup challenge, so a witness-dependent value leaks. A
+/// balanced argument pins it to the constant `0` for every witness, removing the
+/// channel. Dark-pool circuits must call this; circuits whose `claimed_sum` is
+/// instead fixed by the PUBLIC statement (and bound into the channel) are also
+/// safe but are out of scope for this check.
+pub fn assert_lookup_balanced(claimed_sum: SecureField) -> Result<(), WitnessMaskError> {
+    if !claimed_sum.is_zero() {
+        return Err(WitnessMaskError::LookupNotBalanced);
+    }
+    Ok(())
 }
 
 /// Per-column parameters for Layer-1 witness masking.
@@ -269,6 +287,8 @@ pub enum WitnessMaskError {
     },
     #[error("composition randomizer dimension {dimension} below reconstruction-resistance budget {required} (4·h_t must exceed e·(n_F^comp + n_D))")]
     CompositionRandomizerBudgetTooSmall { dimension: usize, required: usize },
+    #[error("lookup is not balanced: claimed_sum must be zero so it does not leak the private multiplicities")]
+    LookupNotBalanced,
 }
 
 /// Masks a witness column: returns `ŵ = w + v_H · r`.
@@ -633,6 +653,16 @@ mod tests {
         assert_eq!(a.len(), 1 << 4);
         assert_ne!(a, b, "independent salt draws must differ");
         assert!(a.iter().any(|v| !v.is_zero()), "salt must not be all-zero");
+    }
+
+    #[test]
+    fn balanced_lookup_check_is_fail_closed() {
+        use num_traits::One;
+        assert!(assert_lookup_balanced(SecureField::zero()).is_ok());
+        assert_eq!(
+            assert_lookup_balanced(SecureField::one()).unwrap_err(),
+            WitnessMaskError::LookupNotBalanced
+        );
     }
 
     #[test]

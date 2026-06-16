@@ -826,6 +826,59 @@ mod zk_tests {
         }
     }
 
+    /// LogUp multiplicity leakage. The private multiplicities ride in the masked
+    /// `mult` base-trace column (Layer 1), so their openings are blinded like any
+    /// witness column. The one multiplicity-dependent quantity masking does NOT
+    /// cover is the public `claimed_sum`: it is a fixed linear functional of the
+    /// multiplicities at the lookup challenge. Negative control with teeth:
+    /// perturbing a single multiplicity changes `claimed_sum`, so an unbalanced
+    /// value separates witnesses; the balanced check rejects any nonzero value.
+    #[test]
+    fn test_claimed_sum_leaks_multiplicities_unless_balanced() {
+        use num_traits::{One, Zero};
+        use stwo::core::channel::Blake2sChannel;
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo::prover::backend::Column;
+        use stwo::prover::statistical_zk::assert_lookup_balanced;
+
+        use crate::plonk::{gen_interaction_trace, PlonkCircuitTrace, PlonkLookupElements};
+
+        let log_n_rows = 6u32;
+        // Fixed lookup challenge; its exact value is irrelevant to the leak.
+        let lookup_elements = PlonkLookupElements::draw(&mut Blake2sChannel::default());
+
+        let claimed_sum = |mult0: u32| -> SecureField {
+            let mut fib = vec![BaseField::one(), BaseField::one()];
+            for _ in 0..(1 << log_n_rows) {
+                fib.push(fib[fib.len() - 1] + fib[fib.len() - 2]);
+            }
+            let range = 0..(1usize << log_n_rows);
+            let mut circuit = PlonkCircuitTrace {
+                mult: range.clone().map(|_| 2.into()).collect(),
+                a_wire: range.clone().map(|i| i.into()).collect(),
+                b_wire: range.clone().map(|i| (i + 1).into()).collect(),
+                c_wire: range.clone().map(|i| (i + 2).into()).collect(),
+                op: range.clone().map(|_| 1.into()).collect(),
+                a_val: range.clone().map(|i| fib[i]).collect(),
+                b_val: range.clone().map(|i| fib[i + 1]).collect(),
+                c_val: range.clone().map(|i| fib[i + 2]).collect(),
+            };
+            circuit.mult.set(0, mult0.into());
+            gen_interaction_trace(log_n_rows, &circuit, &lookup_elements.0).1
+        };
+
+        assert_ne!(
+            claimed_sum(2),
+            claimed_sum(7),
+            "claimed_sum must change with the multiplicities (it is a leak channel)"
+        );
+
+        // The balanced requirement: reject any nonzero claimed_sum, accept 0.
+        assert!(assert_lookup_balanced(SecureField::one()).is_err());
+        assert!(assert_lookup_balanced(SecureField::zero()).is_ok());
+    }
+
     /// Mask-isolating randomization check: same circuit, two randomizer seeds. The
     /// masked base-trace (tree 1) and interaction (tree 2) OODS openings must
     /// differ — with the witness fixed, only the trace mask `v_H·r` can cause that
