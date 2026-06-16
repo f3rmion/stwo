@@ -879,6 +879,31 @@ mod zk_tests {
         assert!(assert_lookup_balanced(SecureField::zero()).is_ok());
     }
 
+    /// Negative control: the fibonacci PLONK fixture is deliberately UNBALANCED —
+    /// its `claimed_sum` is a nonzero linear functional of the private
+    /// multiplicities (a leak channel). The balanced gate must reject the actual
+    /// fixture value, so this fixture is unsound as a dark-pool circuit (use the
+    /// balanced LogUp fixture for that). See `logup_balanced` for the sound shape.
+    #[test]
+    fn test_unbalanced_plonk_claimed_sum_rejected() {
+        use num_traits::Zero;
+        use stwo::prover::statistical_zk::assert_lookup_balanced;
+
+        let log_n_rows = 6;
+        let config = zk_config(log_n_rows);
+        let mut rng = StdRng::seed_from_u64(2024);
+        let (component, _proof) = prove_fibonacci_plonk_zk(log_n_rows, config, &mut rng, 128);
+
+        assert!(
+            !component.claimed_sum().is_zero(),
+            "fibonacci PLONK fixture is unbalanced by construction"
+        );
+        assert!(
+            assert_lookup_balanced(component.claimed_sum()).is_err(),
+            "balanced gate must reject the unbalanced fixture's claimed_sum"
+        );
+    }
+
     /// Mask-isolating randomization check: same circuit, two randomizer seeds. The
     /// masked base-trace (tree 1) and interaction (tree 2) OODS openings must
     /// differ — with the witness fixed, only the trace mask `v_H·r` can cause that
