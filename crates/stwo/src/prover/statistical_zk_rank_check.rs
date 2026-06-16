@@ -218,6 +218,72 @@ fn build_t_map(h_t: usize, revealed_points: &[CirclePoint<SecureField>]) -> Vec<
     rows
 }
 
+/// Models the `2^k` SPLIT directions of the unsplit `t` (red-team A1 / GAP B): the
+/// linear map from `t`'s free base-field coefficients to its `2^k` per-chunk openings
+/// `t_chunk_i(p)` at each revealed point, expanded to base coordinates.
+///
+/// Faithful to `sample_composition_randomizer`'s SPREAD layout: `split_k` partitions
+/// the `2^composition_log_size` FFT-basis vector into `2^k` CONTIGUOUS chunks of
+/// `2^(L-k)`, and the sampler places `⌈dimension / 2^k⌉` free coefficients at the
+/// START of each chunk — so EVERY chunk carries randomness (no identically-zero
+/// chunk). A naive prefix `[0, dimension)` would instead leave chunks past the prefix
+/// zero, hence unmasked; this models the deployed (spread) sampler.
+///
+/// Rows: `2^k · 4 · revealed_points.len()`, grouped per point then per chunk (4 base
+/// coordinate rows each). Columns: `4 · 2^k · per_chunk`, ordered
+/// `(coordinate j, chunk c, local slot)`.
+fn build_t_chunk_map(
+    dimension: usize,
+    composition_log_size: u32,
+    composition_log_split: u32,
+    revealed_points: &[CirclePoint<SecureField>],
+) -> Vec<Vec<BaseField>> {
+    let chunk_coeff_count = 1usize << (composition_log_size - composition_log_split);
+    let n_chunks = 1usize << composition_log_split;
+    let per_chunk = dimension.div_ceil(n_chunks).min(chunk_coeff_count);
+    let n_cols = 4 * n_chunks * per_chunk;
+    let unit_qm31: [SecureField; 4] = [
+        SecureField::from_u32_unchecked(1, 0, 0, 0),
+        SecureField::from_u32_unchecked(0, 1, 0, 0),
+        SecureField::from_u32_unchecked(0, 0, 1, 0),
+        SecureField::from_u32_unchecked(0, 0, 0, 1),
+    ];
+
+    let mut rows: Vec<Vec<BaseField>> = Vec::new();
+    for &p in revealed_points {
+        for chunk in 0..n_chunks {
+            let mut coord_rows: [Vec<BaseField>; 4] =
+                core::array::from_fn(|_| Vec::with_capacity(n_cols));
+            for j in 0..4 {
+                for c in 0..n_chunks {
+                    for local in 0..per_chunk {
+                        // Free coefficient (coord j, chunk c, local slot). It
+                        // contributes to chunk `c`'s opening only.
+                        let contrib = if c == chunk {
+                            unit_qm31[j] * basis_value_at(chunk_coeff_count, local, p)
+                        } else {
+                            SecureField::zero()
+                        };
+                        let [a, b, cc, d] = contrib.to_m31_array();
+                        coord_rows[0].push(a);
+                        coord_rows[1].push(b);
+                        coord_rows[2].push(cc);
+                        coord_rows[3].push(d);
+                    }
+                }
+            }
+            rows.extend(coord_rows);
+        }
+    }
+    rows
+}
+
+/// True iff every base-coordinate row of chunk `chunk` (for a SINGLE-point map) is
+/// zero — i.e. that chunk of `t` is identically zero and masks nothing.
+fn t_chunk_block_is_zero(single_point_map: &[Vec<BaseField>], chunk: usize) -> bool {
+    (4 * chunk..4 * chunk + 4).all(|r| single_point_map[r].iter().all(|v| v.is_zero()))
+}
+
 /// Off-domain OODS points used across the Lemma-1 / Lemma-2 checks.
 ///
 /// `n_F = 2`: the pair `{ζ, ζg}`, where `g` is the trace subgroup generator. We
@@ -265,6 +331,46 @@ mod tests {
             vec![BaseField::zero(), BaseField::from(1u32), BaseField::from(2u32), BaseField::from(3u32)],
         ];
         assert_eq!(m31_matrix_rank(&wide), 2);
+    }
+
+    // ----- Part B': the 2^k split-chunk coverage of the unsplit `t` (GAP B / A1). -----
+
+    #[test]
+    fn t_split_chunk_coverage_under_spread_sampler() {
+        // Red-team A1 / GAP B, falsifiable check — now verifying the FIX. With the
+        // spread `sample_composition_randomizer`, `⌈dimension/2^k⌉` free coefficients
+        // sit at the START of EACH of the `2^k` split chunks, so NO chunk is
+        // identically zero and every split direction is masked. (A naive PREFIX
+        // `[0, dimension)` left chunks past the prefix zero -> their masked openings
+        // `q'_chunk = q_chunk` were UNMASKED; this was live at deployed plonk log_n=7
+        // — the gap the spread sampler closes. Per-chunk SUFFICIENCY for full hiding
+        // is GAP B; this confirms COVERAGE, the necessary precondition.)
+        let p = CirclePoint::<SecureField>::get_point(0x5eed);
+
+        // (a) Poseidon deployed shape: L = 7, k = 2, dimension = 128 (full space) ->
+        //     4 chunks of 32, each fully random.
+        let map = build_t_chunk_map(128, 7, 2, &[p]);
+        for chunk in 0..4 {
+            assert!(!t_chunk_block_is_zero(&map, chunk), "poseidon shape: chunk {chunk} masked");
+        }
+
+        // (b) The shape the PREFIX layout broke — PLONK at log_n_rows = 7: L = 8,
+        //     k = 1, dimension = 128 = HALF the coeff space. The spread sampler puts
+        //     64 coeffs at the start of EACH chunk, so the right chunk (identically
+        //     zero under the old prefix) is now masked.
+        let map = build_t_chunk_map(128, 8, 1, &[p]);
+        assert!(!t_chunk_block_is_zero(&map, 0), "left composition chunk masked");
+        assert!(
+            !t_chunk_block_is_zero(&map, 1),
+            "right composition chunk now masked by the spread sampler"
+        );
+
+        // (c) Even a small dimension spreads to every chunk: dimension = 8, k = 2 ->
+        //     ⌈8/4⌉ = 2 free coeffs in each of the 4 chunks.
+        let map = build_t_chunk_map(8, 7, 2, &[p]);
+        for chunk in 0..4 {
+            assert!(!t_chunk_block_is_zero(&map, chunk), "small dimension still covers chunk {chunk}");
+        }
     }
 
     // ----- Part B: Lemma 1 column evaluation matrix E. -----

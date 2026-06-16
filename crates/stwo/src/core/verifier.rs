@@ -171,17 +171,22 @@ pub fn verify_zk<MC: MerkleChannel>(
         composition_log_split
     );
 
-    // Fail closed if the committed composition-randomizer (`t`) tree is too small
-    // to even permit a reconstruction-resistant `t` for the real opening counts:
-    // `t`'s coefficient space must exceed `n_F^comp + n_D` (composition OODS-sampled
-    // at ζ only, so n_F^comp = 1). This is a necessary PUBLIC-PARAMETER condition;
-    // the prover is responsible for actually randomizing `t` to this budget
-    // (enforced in prove_zk). Mirrors required_composition_randomizer_dimension.
-    let required_t_dimension = 1 + commitment_scheme.config.fri_config.n_queries + 1;
+    // Fail closed if the committed composition-randomizer (`t`) tree is too small to
+    // even permit a JOINT-HIDING `t` for the real opening counts: `t`'s coefficient
+    // space must reach the k-aware budget `⌈(e + 2^k − 1)·(n_F^comp + n_D) / e⌉`
+    // (composition OODS-sampled at ζ only, so n_F^comp = 1; the `2^k`-way split
+    // exposes `2^k − 1` freedoms per point). Necessary PUBLIC-PARAMETER condition;
+    // the prover owns the actual randomization (enforced in prove_zk). Mirrors
+    // `required_composition_randomizer_dimension` (inlined: core cannot call prover).
+    let points = 1 + commitment_scheme.config.fri_config.n_queries;
+    let split_freedoms = ((1usize << composition_log_split) - 1) * points;
+    let required_t_dimension =
+        (SECURE_EXTENSION_DEGREE * points + split_freedoms + SECURE_EXTENSION_DEGREE - 1)
+            / SECURE_EXTENSION_DEGREE;
     let t_coefficient_space = 1usize << (split_composition_log_degree_bound + composition_log_split);
     if t_coefficient_space < required_t_dimension {
         return Err(VerificationError::InvalidStructure(std_shims::ToString::to_string(
-            &"composition randomizer tree too small for reconstruction-resistance",
+            &"composition randomizer tree too small for the joint-hiding budget",
         )));
     }
 

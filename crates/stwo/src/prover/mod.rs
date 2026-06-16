@@ -193,20 +193,6 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
         sample_composition_randomizer, sample_salt_column, WitnessMaskError,
     };
 
-    // Fail closed if the composition randomizer `t` is below the reconstruction-
-    // resistance budget derived from the real opening counts: the composition is
-    // OODS-sampled at ζ only (n_F^comp = 1) and queried at n_D positions, so
-    // `h_t` must exceed `n_F^comp + n_D` (equivalently `4·h_t > e·(n_F^comp + n_D)`)
-    // or the verifier could interpolate `t`, split it, and strip the mask.
-    let required_t_dimension =
-        required_composition_randomizer_dimension(1, commitment_scheme.config.fri_config.n_queries);
-    if randomizer_dimension < required_t_dimension {
-        Err(WitnessMaskError::CompositionRandomizerBudgetTooSmall {
-            dimension: randomizer_dimension,
-            required: required_t_dimension,
-        })?;
-    }
-
     let include_all_preprocessed_columns = false;
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
         .polynomials
@@ -236,21 +222,45 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
     );
     span1.exit();
 
-    // Draw the composition randomizer `t` and mask the composition: q' = q + t.
-    let composition_log_size = composition_poly.log_size();
-    let t = sample_composition_randomizer::<B, _>(composition_log_size, randomizer_dimension, rng)?;
-    let composition_poly = add_composition_randomizer(composition_poly, &t)?;
-
-    // Split factor `k`: split `q'` into `2^k` chunks landing at the CONSTRAINT trace
-    // domain (salt-aware: the masked trees' salt columns sit at the composition
+    // Split factor `k`: `q'` is split into `2^k` chunks landing at the CONSTRAINT
+    // trace domain (salt-aware: the masked trees' salt columns sit at the composition
     // bound, so use `base_constraint_trace_log_degree_bound`, not the declared trace
     // bounds). `k = composition_log_size - base` = `ceil(log2(constraint_degree))`.
     // `t` stays unsplit at `composition_log_size` (one tree `k` levels above the
     // chunks). With `k = 1` this is the single `split_at_mid`.
+    let composition_log_size = composition_poly.log_size();
     let composition_log_split = composition_log_size
         - component_provers
             .components()
             .base_constraint_trace_log_degree_bound();
+
+    // Fail closed if `t` is below the JOINT-HIDING budget (red-team A1/A2): the
+    // composition is OODS-sampled at ζ only (n_F^comp = 1) and queried at n_D
+    // positions, and the `2^k`-way split exposes `2^k − 1` freedoms per point that the
+    // single unsplit `t` must blind together with its own revealed functionals. The
+    // earlier check enforced only reconstruction-resistance (k-independent) and was
+    // too loose for the split.
+    let required_t_dimension = required_composition_randomizer_dimension(
+        1,
+        commitment_scheme.config.fri_config.n_queries,
+        composition_log_split,
+    );
+    if randomizer_dimension < required_t_dimension {
+        Err(WitnessMaskError::CompositionRandomizerBudgetTooSmall {
+            dimension: randomizer_dimension,
+            required: required_t_dimension,
+        })?;
+    }
+
+    // Draw the composition randomizer `t` (spread across the 2^k split chunks so none
+    // is unmasked) and mask the composition: q' = q + t.
+    let t = sample_composition_randomizer::<B, _>(
+        composition_log_size,
+        composition_log_split,
+        randomizer_dimension,
+        rng,
+    )?;
+    let composition_poly = add_composition_randomizer(composition_poly, &t)?;
 
     // Compute the global lifting up front (before committing) so the Layer-0 salt
     // columns can be sized at leaf size (`lifting - log_blowup`); at leaf size a

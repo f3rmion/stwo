@@ -55,20 +55,35 @@ pub const fn required_column_randomizer_dimension(n_oods: usize, n_queries: usiz
     SECURE_EXTENSION_DEGREE * n_oods + n_queries
 }
 
-/// Minimum composition-randomizer (`t`) dimension for RECONSTRUCTION-RESISTANCE.
+/// Minimum composition-randomizer (`t`) dimension `h_t` for JOINT CHUNK HIDING of a
+/// `2^composition_log_split`-way split.
 ///
-/// `t` is a secure polynomial: every revealed opening (OODS and each query) is a
-/// full `F` value charging `e` base functionals, so the verifier sees
-/// `e·(n_F^comp + n_D)` base functionals of `t`. For `t` to remain
-/// under-determined (un-reconstructible) its free base-field coefficients
-/// `e·h_t` must STRICTLY exceed that: `e·h_t > e·(n_F^comp + n_D)`, i.e.
-/// `h_t > n_F^comp + n_D`. Below this the verifier interpolates `t`, splits it
-/// publicly, and strips the mask. Returns the minimum admissible `h_t`.
+/// At each of the `n_F^comp + n_D` revealed points the verifier sees ONE combined
+/// `t`-functional (`e` base coordinates), while the witness exposes
+/// `2^k − 1` independent split-direction freedoms — the kernel of the Horner fold
+/// `(c_0,…,c_{2^k−1}) ↦ Q` (one combination is pinned by the trace). `t` must blind
+/// BOTH: its `e·h_t` base degrees of freedom must cover
+/// `dim R + dim S = (e + 2^k − 1)·(n_F^comp + n_D)`, so
+/// `h_t ≥ ⌈(e + 2^k − 1)·(n_F^comp + n_D) / e⌉`.
+///
+/// This DOMINATES the older reconstruction-resistance floor `h_t > n_F^comp + n_D`
+/// (below which the verifier interpolates `t`, splits it publicly, and strips the
+/// mask) for every `k ≥ 1`, so it is the single budget to enforce. The earlier,
+/// k-independent formula enforced only reconstruction-resistance and MISSED the
+/// `2^k`-dependent split-freedom term (red-team A1/A2 finding). CANDIDATE upper
+/// bound: the EXACT sufficient `h_t` is the joint `R ⊕ S` rank (GAP B); this is the
+/// conservative fail-closed count.
 pub const fn required_composition_randomizer_dimension(
     n_oods_comp: usize,
     n_queries: usize,
+    composition_log_split: u32,
 ) -> usize {
-    n_oods_comp + n_queries + 1
+    let points = n_oods_comp + n_queries;
+    // dim S = (2^k − 1)·points split-direction freedoms; dim R = e·points revealed
+    // `t`-functionals. h_t ≥ ⌈(dim R + dim S) / e⌉.
+    let split_freedoms = ((1usize << composition_log_split) - 1) * points;
+    let total = SECURE_EXTENSION_DEGREE * points + split_freedoms;
+    (total + SECURE_EXTENSION_DEGREE - 1) / SECURE_EXTENSION_DEGREE
 }
 
 /// Fail-closed check that a LogUp component is BALANCED (`claimed_sum == 0`).
@@ -385,10 +400,25 @@ where
 // ---------------------------------------------------------------------------
 
 /// Draws a composition randomizer `t`: a random secure polynomial of `log_size`,
-/// each of its four QM31 coordinate polynomials carrying `dimension` independent
-/// base-field coefficients (the rest zero).
+/// each of its four QM31 coordinate polynomials carrying ~`dimension` independent
+/// base-field coefficients, **spread across the `2^composition_log_split` split
+/// chunks** rather than packed into a low prefix.
+///
+/// `split_k` partitions the coefficient vector into `2^k` CONTIGUOUS chunks of
+/// `2^(log_size − k)`. A naive prefix `[0, dimension)` leaves every chunk past the
+/// prefix IDENTICALLY ZERO, so its masked opening `q'_chunk = q_chunk` is UNMASKED
+/// (the decomposition pitfall the unsplit `t` exists to prevent; red-team A1 found
+/// this live at deployed plonk `log_n=7`). To guarantee every split direction is
+/// blinded, place `⌈dimension / 2^k⌉` random coefficients at the START of EACH chunk
+/// (the rest zero), so all `2^k` chunks carry randomness. Total free coefficients
+/// per coordinate are `2^k · ⌈dimension / 2^k⌉ ≥ dimension`, still within the
+/// coefficient space.
+///
+/// (Per-chunk SUFFICIENCY — that `⌈dimension/2^k⌉` per chunk fully hides — is the
+/// joint `R ⊕ S` rank, GAP B; this guarantees COVERAGE, the necessary precondition.)
 pub fn sample_composition_randomizer<B, R>(
     log_size: u32,
+    composition_log_split: u32,
     dimension: usize,
     rng: &mut R,
 ) -> Result<SecureCirclePoly<B>, WitnessMaskError>
@@ -403,10 +433,15 @@ where
             coeff_count,
         });
     }
+    let chunk_size = coeff_count >> composition_log_split; // 2^(log_size − k)
+    let n_chunks = 1usize << composition_log_split;
+    // Free coefficients at the start of each chunk; capped at the chunk size.
+    let per_chunk = dimension.div_ceil(n_chunks).min(chunk_size);
     Ok(SecureCirclePoly(core::array::from_fn(|_| {
         let coeffs: Col<B, BaseField> = (0..coeff_count)
             .map(|i| {
-                if i < dimension {
+                // Position within this coefficient's chunk.
+                if (i & (chunk_size - 1)) < per_chunk {
                     sample_base_field(rng)
                 } else {
                     BaseField::zero()
@@ -599,7 +634,8 @@ mod tests {
         }));
         let mut rng = StdRng::seed_from_u64(7);
         let t =
-            sample_composition_randomizer::<CpuBackend, _>(log_size, 1 << log_size, &mut rng).unwrap();
+            sample_composition_randomizer::<CpuBackend, _>(log_size, 1, 1 << log_size, &mut rng)
+                .unwrap();
 
         let zeta = CirclePoint::get_point(998877);
         let q_at = q.eval_at_point(zeta);
@@ -613,7 +649,7 @@ mod tests {
     fn composition_randomizer_rejects_oversized_dimension() {
         let mut rng = StdRng::seed_from_u64(1);
         assert!(matches!(
-            sample_composition_randomizer::<CpuBackend, _>(3, 9, &mut rng),
+            sample_composition_randomizer::<CpuBackend, _>(3, 1, 9, &mut rng),
             Err(WitnessMaskError::CompositionRandomizerDimensionTooLarge {
                 dimension: 9,
                 coeff_count: 8,
@@ -627,7 +663,7 @@ mod tests {
             CpuCirclePoly::new((0..1u32 << 6).map(BaseField::from_u32_unchecked).collect())
         }));
         let mut rng = StdRng::seed_from_u64(2);
-        let t = sample_composition_randomizer::<CpuBackend, _>(5, 1 << 5, &mut rng).unwrap();
+        let t = sample_composition_randomizer::<CpuBackend, _>(5, 1, 1 << 5, &mut rng).unwrap();
         assert!(matches!(
             add_composition_randomizer(q, &t),
             Err(WitnessMaskError::CompositionRandomizerLogSizeMismatch {
@@ -656,6 +692,54 @@ mod tests {
     }
 
     #[test]
+    fn split_multiplier_vanishing_scan_t3() {
+        // Audit §8 T3 — DOCUMENTED NON-ISSUE (red-team A1). A Horner-fold recombination
+        // multiplier `(p.repeated_double(mlb - 1 + i)).x` is singular on the composition
+        // QUERY domain `CanonicCoset(mlb + log_blowup)` exactly at fold level
+        // `i = log_blowup`, where it vanishes on EVERY point (each canonic point has
+        // order `2^(L+1)`, so `2^(L-1)` doublings land all of them on an order-4 x=0
+        // point). BUT
+        // `recombine_split_evals` is only ever evaluated at the random OODS point ζ
+        // (`extract_composition_oods_eval_zk`), NEVER on the query domain — chunk query
+        // openings go through FRI as ordinary committed columns and are not recombined
+        // with these multipliers. So this query-domain vanishing is on the WRONG domain
+        // for the deployed call: at a uniformly random ζ a vanishing multiplier is a
+        // Schwartz–Zippel event of probability ≤ 2^-100, already inside the soundness/ε
+        // budget. This scan records the algebraic fact; it is NOT a deployment
+        // constraint. The load-bearing statement the cryptographer signs is instead
+        // `ζ.repeated_double(mlb - 1 + i).x ≠ 0 at random ζ` (the torsion-avoidance
+        // genericity that folds into ε).
+        use crate::core::poly::circle::CanonicCoset;
+        for mlb in 4..=8u32 {
+            for log_blowup in 1..=2u32 {
+                let l_dom = mlb + log_blowup;
+                let domain = CanonicCoset::new(l_dom).circle_domain();
+                for i in 0..4u32 {
+                    let exp = mlb - 1 + i;
+                    let n_vanish = domain
+                        .iter()
+                        .filter(|p| p.repeated_double(exp).x.is_zero())
+                        .count();
+                    if i == log_blowup {
+                        assert_eq!(
+                            n_vanish,
+                            1 << l_dom,
+                            "level i = log_blowup must vanish on the entire query domain \
+                             (mlb={mlb}, log_blowup={log_blowup})"
+                        );
+                    } else {
+                        assert_eq!(
+                            n_vanish, 0,
+                            "only level i = log_blowup may vanish (mlb={mlb}, \
+                             log_blowup={log_blowup}, i={i})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn balanced_lookup_check_is_fail_closed() {
         use num_traits::One;
         assert!(assert_lookup_balanced(SecureField::zero()).is_ok());
@@ -670,8 +754,11 @@ mod tests {
         // Column randomizer: e·n_F + n_D (e = 4).
         assert_eq!(required_column_randomizer_dimension(1, 64), 4 + 64);
         assert_eq!(required_column_randomizer_dimension(2, 30), 4 * 2 + 30);
-        // Composition randomizer: h_t > n_F^comp + n_D, i.e. n_F^comp + n_D + 1.
-        assert_eq!(required_composition_randomizer_dimension(1, 64), 66);
-        assert_eq!(required_composition_randomizer_dimension(1, 3), 5);
+        // Composition randomizer (k-aware joint hiding): ⌈(e + 2^k − 1)·points / e⌉,
+        // points = n_F^comp + n_D = 65. k=1: ⌈325/4⌉ = 82. k=2: ⌈455/4⌉ = 114.
+        assert_eq!(required_composition_randomizer_dimension(1, 64, 1), 82);
+        assert_eq!(required_composition_randomizer_dimension(1, 64, 2), 114);
+        // Small case stays at 5 for k=1: points=4, ⌈20/4⌉ = 5.
+        assert_eq!(required_composition_randomizer_dimension(1, 3, 1), 5);
     }
 }
