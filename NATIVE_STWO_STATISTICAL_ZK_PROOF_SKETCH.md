@@ -173,6 +173,10 @@ rather than the perfect-ZK quotient-chunk *dependent* correction of Haböck–Ki
 highest-value claim to confirm. Our equations show single-point hiding cleanly; the joint full-rank
 bound over all revealed points (and its `ε`) is the part we cannot fully close.
 
+> **As implemented:** the wired check is `q'(ζ)_eff − t(2ζ)`, not the single-point `q'(ζ) − t(ζ)`
+> framed above. See **B.7** for Lemma 2 re-derived in the observed quantities
+> `{q'_left(ζ), q'_right(ζ), t(2ζ)}`; the cancellation is unchanged.
+
 ## 8. Lemma 3 (FRI folds and final layer add nothing)
 
 Each FRI fold value is a fixed `F`-linear combination (with public folding challenges) of two values of
@@ -254,9 +258,10 @@ in §6–§10 where they conflict. **This remains a candidate; certification sti
   is enforced. NOTE the implemented check is `q'(ζ)_eff − t(2ζ)` evaluated at the lifted effective
   point, NOT the single-point `q'(ζ) − t(ζ)` of §2/§7 — `t` is opened at
   `2ζ = ζ.repeated_double(COMPOSITION_LOG_SPLIT)` so it lands on the same effective point the split
-  chunks fold to. Lemma 2 below must be re-derived in the observed quantities
-  `{q'_left(ζ), q'_right(ζ), t(2ζ)}` (the cancellation still holds — combined `t` is the only
-  `t`-functional revealed — but the single-point framing is inaccurate as written).
+  chunks fold to. Lemma 2 is re-derived in the observed quantities
+  `{q'_left(ζ), q'_right(ζ), t(2ζ)}` in **B.7** (the cancellation still holds — combined `t` is the
+  only `t`-functional revealed — the single-point *quantities* of §2/§7 are inaccurate as written, the
+  cancellation conclusion unchanged).
 - **Still NOT built:** Layer-1 trace-column masking (the wired path masks the composition only, so it
   is not yet witness-hiding on the trace), and **Layer 0 (hiding/salted Merkle)**. The runtime
   leakage-budget check is also not yet invoked in `prove_zk`.
@@ -338,3 +343,83 @@ admissible configurations, nor the statistical-distance bound `ε`.
 Overall: the adversarial pass moved GAP A and GAP B to **PROVED-MODULO their non-degeneracy
 assumptions, with those assumptions numerically confirmed at tested parameters and no fundamental break
 found** — a strengthened candidate, still pending the cryptographer's general theorems and `ε`.
+
+### B.7 Lemma 2, re-derived in the implemented quantities `{q'_left(ζ), q'_right(ζ), t(2ζ)}`
+
+§7 derived chunk-hiding in idealized single-point quantities `{q'₀(p), q'₁(p), t(p)}`. The wired path
+(`prove_zk`/`verify_zk`, `statistical-zk` feature) reveals a slightly different set, because the masked
+composition is committed **split** while `t` is committed **unsplit, one log size taller**. This
+subsection redoes Lemma 2 in exactly the quantities the verifier sees. The cancellation — the whole
+reason `t` is unsplit — survives unchanged; only the framing moves.
+
+**What the verifier actually observes (per revealed point `ζ`).**
+- the two split-chunk openings `q'_left(ζ), q'_right(ζ)` of the masked composition (committed at
+  `split_composition_log_degree_bound = composition_log_degree_bound − COMPOSITION_LOG_SPLIT`),
+  reconstructed into the effective value
+  `q'(ζ)_eff = q'_left(ζ) + π·q'_right(ζ)`, with public split multiplier
+  `π = ζ.repeated_double(max_log_degree_bound − 1).x` (`≠ 0` on the query domain by B.1) —
+  computed by `extract_composition_oods_eval_zk` (`core/proof.rs`);
+- the single **combined** randomizer opening `t(2ζ)`, where `2ζ := ζ.repeated_double(COMPOSITION_LOG_SPLIT)`
+  — `extract_t_oods_eval`. `t` is committed unsplit at the full composition log size (one above the
+  chunks), so opening it at the doubled point returns its value at the *same effective point* the chunks
+  fold to. The verifier never sees `t_left, t_right`.
+
+The verifier check is `q'(ζ)_eff − t(2ζ) = N(ζ)/v_H(ζ)` (`core/verifier.rs` DEEP-ALI check; mirrored as
+the prover-side sanity check in `prove_zk`).
+
+**The mask is linear through the split.** `prove_zk` forms `q' = q + t` on the full (log size
+`s = composition_log_degree_bound`) coefficient vectors and only *then* splits. Splitting is
+`F`-linear, so
+```
+  q'_left = q_left + t_left,   q'_right = q_right + t_right,   (t_left, t_right) = split(t).
+```
+Opening the unsplit `t` at `2ζ` returns precisely the chunk reconstruction of its own halves,
+```
+  t(2ζ) = t_left(ζ) + π·t_right(ζ),
+```
+the identity that makes the check well-formed. The *same* multiplier `π` is valid for both the chunks
+and `t` because the unsplit `t` is committed at exactly the chunks' parent (lifted) log size and
+`2ζ = ζ.repeated_double(COMPOSITION_LOG_SPLIT)` is the same single fold the split chunks undergo;
+opening `t` there is identically `t`'s own chunk-reconstruction at `ζ`. (The prover's sanity check
+passing, and `verify_zk` accepting, on the toy `a·b=c` AIR and on PLONK with real LogUp, are exactly
+this identity holding end to end.)
+
+**The single free witness DOF.** As in §7, the only witness-dependent freedom not pinned by the trace
+openings is the split direction. Lemma 1 (via the accepted check) pins the unmasked reconstruction
+`Q(ζ) := q_left(ζ) + π·q_right(ζ) = N(ζ)/v_H(ζ)`. Parametrize `a := q_left(ζ)`, so
+`q_right(ζ) = (Q(ζ) − a)/π`. The observed quantities expand to
+```
+  (i)    q'_left(ζ)    = a + t_left(ζ)
+  (ii)   π·q'_right(ζ) = (Q(ζ) − a) + π·t_right(ζ)
+  (iii)  t(2ζ)         = t_left(ζ) + π·t_right(ζ)
+```
+Adding (i)+(ii): `q'(ζ)_eff = Q(ζ) + t(2ζ)` — i.e. (iii) is exactly the combination already implied by
+(i)+(ii): **linearly dependent**. Three observed quantities, two independent equations in the unknowns
+`{a, t_left(ζ), t_right(ζ)}` ⇒ a one-parameter solution family in `a`. For every `a` there exist
+consistent `t_left(ζ) = q'_left(ζ) − a` and `t_right(ζ) = q'_right(ζ) − (Q(ζ) − a)/π`. Hence `a` is
+**information-theoretically hidden at `ζ`**, provided `t_left(ζ), t_right(ζ)` are free (uniform) — i.e.
+provided `t` carries the budget of B.3.
+
+This is identical to §7 under the substitution `t₀(p) ↦ t_left(ζ)`, `t₁(p) ↦ t_right(ζ)`,
+`t(p) ↦ t(2ζ)`. The doubled opening point is bookkeeping for the one-log-taller unsplit `t` tree; it
+adds **no** new verifier-visible `t`-functional, so the count is unchanged. Had `t` been committed
+split, the verifier would read `t_left(ζ)` directly and recover `a = q'_left(ζ) − t_left(ζ)` — the mask
+collapses, exactly the §7 reason for unsplit `t`.
+
+**Budget (as implemented, per B.3).** `t` is a *secure* polynomial (`e = 4` base coordinates exposed
+per query opening), OODS-sampled at `ζ` only (`n_F^comp = 1`). Reconstruction-resistance is decisive:
+```
+  4·h_t > e·(n_F^comp + n_D)   (else the verifier interpolates t, splits it publicly, strips the mask)
+  4·h_t ≥ dim R + dim S        (joint hiding: R = revealed t-functionals, S = per-point split freedoms)
+```
+The §3/§7 figure `h_t ≳ d·(e·n_F + n_D)` is safe but loose. This budget is **not yet enforced** in
+`prove_zk` (`check_leakage_budget` is not called on `t`) — workstream 4.
+
+**Scope (no over-claim).** This re-derivation establishes only **single-point** chunk-hiding in the
+implemented quantities, and that the `2ζ` opening preserves the §7 cancellation. The **joint** statement
+over all revealed points `{ζ} ∪ {x_j}` — that `t_left(ζ), t_right(ζ)` are jointly uniform under the
+pinned combinations, with its Schwartz–Zippel `ε` — remains **[GAP B]**, unchanged. The numerical rank
+check (B.5) confirms non-identical degeneracy at tested parameters only, not the general theorem. The
+wired path masks the **composition only**: Layer-1 trace masking and Layer-0 salted Merkle are not
+built, so this path is **not yet witness-hiding on the trace**. Candidate until the cryptographer
+certifies GAP B and the budget is enforced.
