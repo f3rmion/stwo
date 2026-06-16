@@ -175,22 +175,26 @@ pub fn verify_zk<MC: MerkleChannel>(
 
     // Read masked composition polynomial commitment (second-to-last commitment).
     // The split chunks are committed at the split composition degree bound; the
-    // global lifting pins their tree height to the taller randomizer tree.
+    // global lifting pins their tree height to the taller randomizer tree. A
+    // trailing leaf-size Layer-0 salt column (at `max_log_degree_bound`) is declared
+    // last.
     let composition_commitment_index = proof.commitments.len() - 2;
+    let mut composition_sizes =
+        vec![split_composition_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE];
+    composition_sizes.push(max_log_degree_bound);
     commitment_scheme.commit(
         proof.commitments[composition_commitment_index],
-        &[split_composition_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE],
+        &composition_sizes,
         channel,
     );
 
     // Read composition randomizer commitment (last commitment). Its unsplit
     // coordinate columns live at the full composition log size, one above the
-    // split chunks.
-    commitment_scheme.commit(
-        *proof.commitments.last().unwrap(),
-        &[split_composition_log_degree_bound + COMPOSITION_LOG_SPLIT; SECURE_EXTENSION_DEGREE],
-        channel,
-    );
+    // split chunks, followed by a trailing leaf-size Layer-0 salt column.
+    let mut t_sizes =
+        vec![split_composition_log_degree_bound + COMPOSITION_LOG_SPLIT; SECURE_EXTENSION_DEGREE];
+    t_sizes.push(max_log_degree_bound);
+    commitment_scheme.commit(*proof.commitments.last().unwrap(), &t_sizes, channel);
 
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
@@ -200,13 +204,19 @@ pub fn verify_zk<MC: MerkleChannel>(
         max_log_degree_bound,
         include_all_preprocessed_columns,
     );
-    // Add the composition polynomial mask points.
-    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    // Add the composition polynomial mask points; the trailing Layer-0 salt column
+    // gets no OODS sample (empty), matching the prover.
+    let mut composition_sample_points = vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE];
+    composition_sample_points.push(vec![]);
+    sample_points.push(composition_sample_points);
     // Add the composition randomizer mask points. The randomizer lives one log size
     // above the split composition chunks, so to open it at the same effective point
-    // the chunks fold to, its sample point is pre-folded by the split depth.
+    // the chunks fold to, its sample point is pre-folded by the split depth. Its
+    // trailing Layer-0 salt column also gets no OODS sample.
     let randomizer_oods_point = oods_point.repeated_double(COMPOSITION_LOG_SPLIT);
-    sample_points.push(vec![vec![randomizer_oods_point]; SECURE_EXTENSION_DEGREE]);
+    let mut t_sample_points = vec![vec![randomizer_oods_point]; SECURE_EXTENSION_DEGREE];
+    t_sample_points.push(vec![]);
+    sample_points.push(t_sample_points);
 
     let composition_oods_eval = proof
         .extract_composition_oods_eval_zk(oods_point, max_log_degree_bound)

@@ -70,9 +70,12 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
         let [.., left_and_right_composition_mask, _t_mask] = &**self.sampled_values else {
             return None;
         };
+        // The composition tree carries a trailing Layer-0 salt column with no OODS
+        // sample; take only the split-chunk coordinate columns.
         let left_and_right_coordinate_evals: [SecureField; 2 * SECURE_EXTENSION_DEGREE] =
             left_and_right_composition_mask
                 .iter()
+                .take(2 * SECURE_EXTENSION_DEGREE)
                 .map(|columns| {
                     let &[eval] = &columns[..] else {
                         return None;
@@ -100,8 +103,11 @@ impl<H: MerkleHasherLifted> StarkProof<H> {
     #[cfg(feature = "statistical-zk")]
     pub(crate) fn extract_t_oods_eval(&self) -> Option<SecureField> {
         let t_mask = self.sampled_values.last()?;
+        // The t tree carries a trailing Layer-0 salt column with no OODS sample;
+        // take only the unsplit randomizer coordinate columns.
         let coordinate_evals: [SecureField; SECURE_EXTENSION_DEGREE] = t_mask
             .iter()
+            .take(SECURE_EXTENSION_DEGREE)
             .map(|columns| {
                 let &[eval] = &columns[..] else {
                     return None;

@@ -282,9 +282,15 @@ in §6–§10 where they conflict. **This remains a candidate; certification sti
   AND interaction columns committed as `ŵ = w + v_H·r` (the cumulative-sum read at current/previous
   row), masked `prove_zk`/`verify_zk` accept, and the trace + interaction openings randomize under the
   mask. CANDIDATE — mechanism only.
-- **Still NOT built:** **Layer 0 (hiding/salted Merkle)**; a leakage budget derived from real
-  OODS/FRI opening counts (currently a conservative caller-supplied dimension); and the cryptographer's
-  no-leak certificate (the joint full-rank / Vandermonde blinding bound, §6 [GAP A] / §7 [GAP B]).
+- **Layer 0 (salted hiding Merkle) is partially wired** behind the feature: the composition-chunk tree
+  and the `t` tree each carry a leaf-size random salt column (no OODS sample point, unread by any
+  constraint, so invisible to FRI) whose values enter every leaf hash, making those trees'
+  authentication-path sibling hashes hiding. The salt is a low-degree blind (CANDIDATE, same caveat as
+  the other randomizers).
+- **Still NOT built:** salting of the **trace + interaction** trees (so their auth paths are not yet
+  hiding); a leakage budget derived from real OODS/FRI opening counts (currently a conservative
+  caller-supplied dimension); and the cryptographer's no-leak certificate (the joint full-rank /
+  Vandermonde blinding bound, §6 [GAP A] / §7 [GAP B]).
 
 ### B.1 The split multiplier never vanishes on the query domain (the §7 π-edge is closed)
 

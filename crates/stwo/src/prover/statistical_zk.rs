@@ -369,6 +369,27 @@ where
     })))
 }
 
+/// Draws a Layer-0 hiding-Merkle salt column: a polynomial of `log_size` whose
+/// every coefficient is a fresh uniform base-field value.
+///
+/// Committed alongside the real columns of a tree at the tree's leaf size (so it
+/// is not replicated across leaves), its values enter every leaf hash and make the
+/// leaf hashes hiding commitments: an authentication path then reveals nothing
+/// about the values of UNOPENED leaves. The salt column is given NO OODS sample
+/// point and is never read by any constraint, so it does not participate in the
+/// FRI quotient. CANDIDATE: like the other randomizers this is a low-degree blind;
+/// the leakage bound is the cryptographer's, not established here.
+pub fn sample_salt_column<B, R>(log_size: u32, rng: &mut R) -> CircleCoefficients<B>
+where
+    B: PolyOps,
+    R: RngCore + CryptoRng + ?Sized,
+{
+    let coeffs: Col<B, BaseField> = (0..1usize << log_size)
+        .map(|_| sample_base_field(rng))
+        .collect();
+    CircleCoefficients::new(coeffs)
+}
+
 /// Returns the masked composition `q' = q + t`, added coordinate- and
 /// coefficient-wise. Both polynomials must share the same log size.
 pub fn add_composition_randomizer<B: PolyOps>(
@@ -566,5 +587,23 @@ mod tests {
                 composition_log_size: 6,
             })
         ));
+    }
+
+    #[test]
+    fn salt_column_is_random_and_varies() {
+        // Guards against a silent no-op salt: a degenerate (e.g. all-zero or
+        // constant) salt column would still let prove_zk/verify_zk pass while
+        // defeating the leaf-hash hiding. Independent draws must differ and not be
+        // all-zero.
+        let mut rng_a = StdRng::seed_from_u64(1);
+        let mut rng_b = StdRng::seed_from_u64(2);
+        let salt_a = sample_salt_column::<CpuBackend, _>(4, &mut rng_a);
+        let salt_b = sample_salt_column::<CpuBackend, _>(4, &mut rng_b);
+
+        let a: Vec<_> = (0..salt_a.coeffs.len()).map(|i| salt_a.coeffs.at(i)).collect();
+        let b: Vec<_> = (0..salt_b.coeffs.len()).map(|i| salt_b.coeffs.at(i)).collect();
+        assert_eq!(a.len(), 1 << 4);
+        assert_ne!(a, b, "independent salt draws must differ");
+        assert!(a.iter().any(|v| !v.is_zero()), "salt must not be all-zero");
     }
 }

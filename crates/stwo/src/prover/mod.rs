@@ -175,7 +175,9 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
     randomizer_dimension: usize,
 ) -> Result<ExtendedStarkProof<MC::H>, ProvingError> {
-    use crate::prover::statistical_zk::{add_composition_randomizer, sample_composition_randomizer};
+    use crate::prover::statistical_zk::{
+        add_composition_randomizer, sample_composition_randomizer, sample_salt_column,
+    };
 
     let include_all_preprocessed_columns = false;
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
@@ -211,50 +213,50 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
     let t = sample_composition_randomizer::<B, _>(composition_log_size, randomizer_dimension, rng)?;
     let composition_poly = add_composition_randomizer(composition_poly, &t)?;
 
-    // Commit on the masked composition polynomial by splitting its coeffs to two polynomials of
-    // degree half the size of the original polynomial, and commit on each half separately.
-    let mut tree_builder = commitment_scheme.tree_builder();
-    let (left_comp_poly_half, right_comp_poly_half) = composition_poly.split_at_mid();
-
-    tree_builder.extend_polys(left_comp_poly_half.into_coordinate_polys());
-    tree_builder.extend_polys(right_comp_poly_half.into_coordinate_polys());
-    tree_builder.commit(channel);
-    span.exit();
-
-    // Read the lifting size from the composition tree (the last tree committed so
-    // far): the global lifting must already pin every committed tree to this height
-    // so that the taller randomizer tree committed next does not introduce a
-    // per-tree fold mismatch in FRI decommitment.
-    let split_composition_log_size = commitment_scheme
-        .trees
-        .last()
-        .unwrap()
-        .commitment
-        .layers
-        .len() as u32
-        - 1;
+    // Compute the global lifting up front (before committing) so the Layer-0 salt
+    // columns can be sized at leaf size (`lifting - log_blowup`); at leaf size a
+    // salt value is not replicated across leaves, so opening one leaf never reveals
+    // an unopened leaf's salt. The lifting must pin every committed tree to one
+    // height so the taller randomizer tree does not introduce a per-tree fold
+    // mismatch in FRI decommitment.
+    let log_blowup = commitment_scheme.config.fri_config.log_blowup_factor;
+    let split_composition_log_size =
+        composition_log_size - crate::core::verifier::COMPOSITION_LOG_SPLIT + log_blowup;
     let lifting_log_size =
         try_get_lifting_log_size(&commitment_scheme.config, split_composition_log_size)?;
-    let max_log_degree_bound =
-        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+    let max_log_degree_bound = lifting_log_size - log_blowup;
 
     // Fail closed unless the configured lifting already accommodates the unsplit
-    // randomizer tree (one log size above the split chunks). Without this, the
-    // committed trees would have mismatched heights and FRI decommitment positions
-    // would be inconsistent across trees.
-    let randomizer_lifting_log_size =
-        composition_log_size + commitment_scheme.config.fri_config.log_blowup_factor;
-    if lifting_log_size < randomizer_lifting_log_size {
+    // randomizer tree (one log size above the split chunks) AND the salt columns
+    // land exactly at leaf size. Without this, committed trees would have
+    // mismatched heights / FRI decommitment positions, or salt values would be
+    // replicated across leaves.
+    let randomizer_lifting_log_size = composition_log_size + log_blowup;
+    if lifting_log_size != randomizer_lifting_log_size {
         Err(crate::core::pcs::utils::InvalidLiftingLogSizeError {
             lifting_log_size,
             min_log_size: randomizer_lifting_log_size,
         })?;
     }
 
-    // Commit on the composition randomizer `t` unsplit, as a separate tree committed last. Its
-    // four coordinate polynomials live at the full composition log size.
+    // Commit on the masked composition polynomial by splitting its coeffs to two polynomials of
+    // degree half the size of the original polynomial, and commit on each half separately. A
+    // leaf-size Layer-0 salt column (no OODS sample) is appended so the tree's leaf hashes hide.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let (left_comp_poly_half, right_comp_poly_half) = composition_poly.split_at_mid();
+
+    tree_builder.extend_polys(left_comp_poly_half.into_coordinate_polys());
+    tree_builder.extend_polys(right_comp_poly_half.into_coordinate_polys());
+    tree_builder.extend_polys(vec![sample_salt_column::<B, _>(max_log_degree_bound, rng)]);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Commit on the composition randomizer `t` unsplit, as a separate tree committed last, with
+    // its own leaf-size Layer-0 salt column. Its four coordinate polynomials live at the full
+    // composition log size.
     let mut t_tree_builder = commitment_scheme.tree_builder();
     t_tree_builder.extend_polys(t.into_coordinate_polys());
+    t_tree_builder.extend_polys(vec![sample_salt_column::<B, _>(max_log_degree_bound, rng)]);
     t_tree_builder.commit(channel);
 
     // Draw OODS point.
@@ -267,14 +269,20 @@ pub fn prove_zk<B: BackendForChannel<MC>, MC: MerkleChannel>(
         include_all_preprocessed_columns,
     );
 
-    // Add the composition polynomial mask points.
-    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    // Add the composition polynomial mask points; the trailing Layer-0 salt column
+    // gets no OODS sample (empty), so it never enters the FRI quotient.
+    let mut composition_sample_points = vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE];
+    composition_sample_points.push(vec![]);
+    sample_points.push(composition_sample_points);
     // Add the composition randomizer mask points. The randomizer lives one log
     // size above the split composition chunks, so to open it at the same effective
     // point the chunks fold to, its sample point is pre-folded by the split depth.
+    // Its trailing Layer-0 salt column also gets no OODS sample.
     let randomizer_oods_point =
         oods_point.repeated_double(crate::core::verifier::COMPOSITION_LOG_SPLIT);
-    sample_points.push(vec![vec![randomizer_oods_point]; SECURE_EXTENSION_DEGREE]);
+    let mut t_sample_points = vec![vec![randomizer_oods_point]; SECURE_EXTENSION_DEGREE];
+    t_sample_points.push(vec![]);
+    sample_points.push(t_sample_points);
 
     // Prove the trace and composition OODS values, and retrieve them.
     let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
