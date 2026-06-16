@@ -153,14 +153,19 @@ probability `≥ 1 − ε_snd` the committed trace satisfies the AIR on `H`.
   its true bound passing FRI). *Attack `A_snd`-9:* prover exploits the lift to pass a column that is not
   low-degree at the claimed split bound.
 
-**O-A6 (Fiat–Shamir binding — includes a KNOWN open finding).**
-- *Attack `A_fs`-1 (unbound `claimed_sum` — REAL, OPEN):* the LogUp public sum `claimed_sum` is **not
-  mixed into the channel** in the PLONK ZK harness; it enters only as a constraint constant. For a circuit
-  using a **nonzero, statement-pinned** `claimed_sum`, `A_snd` can choose `claimed_sum` *after* seeing the
-  challenges → forgery. **Obligation:** either (i) restrict the ZK path to **balanced** lookups
-  (`claimed_sum = 0`, enforced by `assert_lookup_balanced`), or (ii) require `claimed_sum` be absorbed
-  into the transcript **before** `lookup_elements`/`ζ` are drawn (state-machine pattern). The audit must
-  verify the deployed circuits take one of these; otherwise this is a live soundness hole.
+**O-A6 (Fiat–Shamir binding — protocol fix landed + balanced path demonstrated).**
+- *Attack `A_fs`-1 (unbound `claimed_sum` — PROTOCOL-CLOSED + DEMONSTRATED):* the LogUp public sum
+  `claimed_sum` was originally **not mixed into the channel**; it entered only as a constraint constant, so
+  for a **nonzero, statement-pinned** `claimed_sum` an `A_snd` could choose it *after* seeing the challenges
+  → adaptive forgery. **Resolved two ways, both landed:** (i) `claimed_sum` is now absorbed into the
+  transcript **before** `lookup_elements`/`ζ` are drawn (`Component::claimed_sum` + `mix_felts` in
+  prove_zk/verify_zk, `c5e8a98`), closing the adaptive vector; and (ii) the **balanced** lookup path
+  (`claimed_sum = 0`, enforced by `assert_lookup_balanced`) is now **demonstrated end-to-end** — fixture
+  `examples/src/logup_balanced` proves+verifies a permutation LogUp whose verifier enforces the gate, and
+  the unbalanced PLONK fixture is an explicit negative test (`test_unbalanced_plonk_claimed_sum_rejected`,
+  `c088649`). **Residual:** for a deployed circuit the audit must still verify the verifier checks the
+  bound value against its expected total (`0` balanced, or the statement-pinned value) — that
+  instantiation is the dark-pool integration's, the mechanism is no longer in question.
 - *Attack `A_fs`-2 (absorption order):* prove the transcript order binds every new commitment before the
   challenge that depends on it: `commit(q'+salt) → commit(t+salt) → draw ζ`. Confirm `t` is bound before
   `ζ` (else adaptivity) and the randomizer dimension / budget are not themselves challengeable.
@@ -244,7 +249,7 @@ explicitly disallowed** — this line is the cryptographer's signature.
 | A_snd-7 | A | mask degree headroom encodes out-of-AIR value | obligation O-A3 |
 | A_snd-8 | A | declare non-empty tree as column-less | obligation O-A4 |
 | A_snd-9 | A | lifted column low-degree at lift but not at true bound | obligation O-A5 |
-| **A_fs-1** | **A** | **unbound `claimed_sum` → adaptive forgery** | **PROTOCOL FIX LANDED** — `claimed_sum` now mixed into the FS transcript before challenges (`Component::claimed_sum` + `mix_felts` in prove_zk/verify_zk); the app-level check (vector 2 below) remains the integration's |
+| **A_fs-1** | **A** | **unbound `claimed_sum` → adaptive forgery** | **FIX LANDED + DEMONSTRATED** — channel-bound before challenges (`c5e8a98`); balanced gate `assert_lookup_balanced` proven end-to-end on `logup_balanced` fixture + negative test on PLONK (`c088649`). Deployed-circuit instantiation of the check remains the integration's |
 | A_fs-2 | A | absorption-order / FS binding | obligation O-A6 |
 | A_zk-1 | B | `E` identically rank-deficient (GAP A) | obligation O-B2 |
 | A_zk-2 | B | `t` over-determined / reconstruction (GAP B, `k`-aware) | obligation O-B3 |
@@ -259,10 +264,11 @@ explicitly disallowed** — this line is the cryptographer's signature.
   parameters, the trust base. Output: this document, ratified.
 - **G1 — soundness reductions (A).** O-A1, O-A4, O-A5, O-A6 written and peer-reviewed. **Hard gate:**
   A_fs-1 (`claimed_sum`) resolved in code (balanced-only OR channel-bound) before any "sound" claim.
-  *Status:* the protocol half is done — `claimed_sum` is channel-bound (mixed before challenges) — so
-  the adaptive vector is closed; the application half (verifier checks the bound value against the
-  expected total; `assert_lookup_balanced` for the balanced case) is the dark-pool integration's and is
-  the remaining piece of this gate.
+  *Status:* protocol half done — `claimed_sum` is channel-bound (mixed before challenges), adaptive
+  vector closed (`c5e8a98`); balanced gate demonstrated end-to-end — `logup_balanced` fixture enforces
+  `assert_lookup_balanced` with a green prove/verify and a PLONK negative test (`c088649`). The only
+  remaining piece is instantiating the verifier's check (bound value vs. expected total) on the deployed
+  dark-pool circuit — the integration's, with the mechanism no longer open.
 - **G2 — machine-checked algebra (Lean).** The Tier-1 theorems of §8 — `T1` recombination identity,
   `T2` reduced-vanishing cancellation, `T3` per-level multiplier non-vanishing, `T4` on-`H` vanishing —
   proved in Lean against the trust-base axioms `Ax1–Ax3`. **Hard gate:** no soundness sign-off without
