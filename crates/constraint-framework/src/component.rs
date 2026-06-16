@@ -116,6 +116,12 @@ pub struct FrameworkComponent<C: FrameworkEval> {
     pub(super) preprocessed_column_indices: Vec<usize>,
     pub(super) claimed_sum: SecureField,
     info: InfoEvaluator,
+    /// Enlarged log size at which the (masked) trace columns are committed, when
+    /// statistical-ZK Layer-1 masking is active. Decoupled from `eval.log_size()`,
+    /// which remains the constraint vanishing domain. `None` ⇒ transparent
+    /// behaviour (committed size == vanishing size).
+    #[cfg(feature = "statistical-zk")]
+    masked_trace_log_size: Option<u32>,
 }
 
 impl<E: FrameworkEval> FrameworkComponent<E> {
@@ -156,7 +162,43 @@ impl<E: FrameworkEval> FrameworkComponent<E> {
             info,
             preprocessed_column_indices,
             claimed_sum,
+            #[cfg(feature = "statistical-zk")]
+            masked_trace_log_size: None,
         }
+    }
+
+    /// Declares that the trace columns are committed at the enlarged `log_size`
+    /// produced by statistical-ZK Layer-1 masking (`ŵ = w + v_H·r`), while the
+    /// constraints still vanish on the original `eval.log_size()` domain.
+    ///
+    /// CANDIDATE: this only wires the masked geometry; it does not certify hiding.
+    #[cfg(feature = "statistical-zk")]
+    pub fn with_masked_trace_log_size(mut self, masked_trace_log_size: u32) -> Self {
+        assert!(
+            masked_trace_log_size >= self.eval.log_size(),
+            "masked trace log size {} must be >= constraint log size {}",
+            masked_trace_log_size,
+            self.eval.log_size()
+        );
+        // Fail closed on nonzero mask offsets. The OODS mask-offset translation
+        // (`mask_points`) steps by the constraint-domain coset, but a masked column
+        // is opened in its enlarged (lifted) frame; the per-offset translation is
+        // not yet adjusted for that frame, so a transition constraint reading a
+        // shifted row would be evaluated at the wrong point. Only offset-0 AIRs may
+        // currently commit masked trace columns.
+        let all_offsets_zero = self
+            .info
+            .mask_offsets
+            .iter()
+            .all(|tree| tree.iter().all(|col| col.iter().all(|&offset| offset == 0)));
+        assert!(
+            all_offsets_zero,
+            "masked trace columns with nonzero mask offsets are not yet supported: \
+             the per-offset OODS translation is not adjusted for the enlarged \
+             committed geometry"
+        );
+        self.masked_trace_log_size = Some(masked_trace_log_size);
+        self
     }
 
     pub fn trace_locations(&self) -> &[TreeSubspan] {
@@ -198,20 +240,36 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
+        // With masking, the composition grows by the same amount the trace was
+        // enlarged, preserving the inner constraint-degree headroom; the vanishing
+        // domain (`eval.log_size()`) is unchanged.
+        #[cfg(feature = "statistical-zk")]
+        if let Some(masked) = self.masked_trace_log_size {
+            return masked + (self.eval.max_constraint_log_degree_bound() - self.eval.log_size());
+        }
         self.eval.max_constraint_log_degree_bound()
     }
 
     fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        // Trace columns are committed at the masked (enlarged) size when Layer-1
+        // masking is active; otherwise at the constraint log size.
+        #[cfg(feature = "statistical-zk")]
+        let column_log_size = self
+            .masked_trace_log_size
+            .unwrap_or_else(|| self.eval.log_size());
+        #[cfg(not(feature = "statistical-zk"))]
+        let column_log_size = self.eval.log_size();
+
         let mut log_degree_bounds = self
             .info
             .mask_offsets
             .as_ref()
-            .map(|tree_offsets| vec![self.eval.log_size(); tree_offsets.len()]);
+            .map(|tree_offsets| vec![column_log_size; tree_offsets.len()]);
 
         log_degree_bounds[0] = self
             .preprocessed_column_indices
             .iter()
-            .map(|_| self.eval.log_size())
+            .map(|_| column_log_size)
             .collect();
 
         log_degree_bounds
@@ -251,10 +309,24 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         let mut mask_points = mask.sub_tree(&self.trace_locations);
         mask_points[PREPROCESSED_TRACE_IDX] = preprocessed_mask;
 
+        // The masked trace is committed `masked - log_size` levels above the
+        // constraint (vanishing) domain, so its OODS opening is lifted by that many
+        // doublings. The constraint vanishing must be taken at the matching reduced
+        // degree, `max_log_degree_bound - (masked - log_size)`, so that
+        // `coset_vanishing(.., point)` equals `v_H` evaluated in the trace's lifted
+        // opening frame. Without masking this is exactly `max_log_degree_bound`.
+        #[cfg(feature = "statistical-zk")]
+        let vanishing_log_degree_bound = match self.masked_trace_log_size {
+            Some(masked) => max_log_degree_bound - (masked - self.eval.log_size()),
+            None => max_log_degree_bound,
+        };
+        #[cfg(not(feature = "statistical-zk"))]
+        let vanishing_log_degree_bound = max_log_degree_bound;
+
         self.eval.evaluate(PointEvaluator::new(
             mask_points,
             evaluation_accumulator,
-            coset_vanishing(CanonicCoset::new(max_log_degree_bound).coset, point).inverse(),
+            coset_vanishing(CanonicCoset::new(vanishing_log_degree_bound).coset, point).inverse(),
             self.eval.log_size(),
             self.claimed_sum,
         ));

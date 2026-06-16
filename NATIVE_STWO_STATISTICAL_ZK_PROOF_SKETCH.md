@@ -262,9 +262,21 @@ in §6–§10 where they conflict. **This remains a candidate; certification sti
   `{q'_left(ζ), q'_right(ζ), t(2ζ)}` in **B.7** (the cancellation still holds — combined `t` is the
   only `t`-functional revealed — the single-point *quantities* of §2/§7 are inaccurate as written, the
   cancellation conclusion unchanged).
-- **Still NOT built:** Layer-1 trace-column masking (the wired path masks the composition only, so it
-  is not yet witness-hiding on the trace), and **Layer 0 (hiding/salted Merkle)**. The runtime
-  leakage-budget check is also not yet invoked in `prove_zk`.
+- **Layer-1 base-trace masking is now wired** behind the `statistical-zk` feature: base-trace columns
+  are committed as `ŵ = w + v_H·r` (§6, Lemma 1), so their off-domain/query openings are randomized
+  while the AIR is unchanged on `H`. Because the constraint framework ties a single log size to the
+  vanishing domain, the committed-column size, and the composition size, a masked component decouples
+  them: `eval.log_size()` stays `2ⁿ` (the vanishing/constraint domain), while the committed trace and
+  the composition grow to the masked geometry, and the OODS-point vanishing degree is reduced by the
+  masking enlargement so it equals `v_H` in the trace's lifted opening frame. The public preprocessed
+  columns are LIFTED (not masked). The runtime leakage budget (`check_leakage_budget`) is invoked
+  fail-closed (still a dimension check, not derived from real opening counts). Validated on the WideFib
+  AIR (toy, no LogUp): masked `prove_zk`/`verify_zk` accept, and the trace openings randomize under the
+  mask. CANDIDATE — mechanism only, no leakage certificate.
+- **Still NOT built / scoped to later increments:** masking of LogUp **interaction** columns (so AIRs
+  with a lookup argument are not yet trace-hidden); masked trace columns with **nonzero mask offsets**
+  (transition constraints reading shifted rows) — currently rejected fail-closed, pending a per-offset
+  OODS translation; and **Layer 0 (hiding/salted Merkle)**.
 
 ### B.1 The split multiplier never vanishes on the query domain (the §7 π-edge is closed)
 

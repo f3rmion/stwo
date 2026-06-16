@@ -10,6 +10,10 @@ default = ["std"]
 std = ["stwo/std", "itertools/use_std", "tracing/std", "num-traits/std", "stwo-std-shims/std"]
 parallel = ["dep:rayon", "stwo/parallel"]
 prover = ["stwo/prover", "std"]
+# Statistical zero-knowledge (witness-hiding) support: enables committing trace
+# columns at an enlarged (masked) degree bound, decoupled from the constraint
+# vanishing domain. Non-default and experimental.
+statistical-zk = ["stwo/statistical-zk"]
 
 [dependencies]
 rayon = { workspace = true, optional = true }
