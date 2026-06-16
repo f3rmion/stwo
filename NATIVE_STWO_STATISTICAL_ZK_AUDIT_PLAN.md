@@ -256,6 +256,33 @@ explicitly disallowed** — this line is the cryptographer's signature.
 | A_zk-3 | B | salt replication for `k>1` weakens Merkle hiding | obligation O-B1 |
 | A_zk-4 | B | third multiplicity channel beyond `{claimed_sum, geometry}` | obligation O-B5 |
 
+### 5.1 Red-team rounds (claude-committee, candidate evidence — NOT a substitute for the §7 firm audit)
+
+Each round = independent adversaries (one per property/dimension) attempt to break a specific claim, then
+every claimed break is handed to an independent skeptic instructed to *refute* it (falsify-before-certify).
+A break counts only if the skeptic cannot refute it from the code. Claude red-teaming is statistical and
+fallible; these rounds raise confidence and catch regressions, they do not discharge any soundness/ZK
+obligation.
+
+- **Round 1** (during M6/M8 hardening). Confirmed: unbound `claimed_sum` adaptive vector (→ A_fs-1, fixed
+  `c5e8a98`); non-`k`-aware GAP B budget (→ k-aware floor, `6bff7fb`); prefix sampler left split chunks
+  unmasked (→ spread sampler, `6bff7fb`). Corrected an over-called T3 deployment constraint.
+
+- **Round 2** (post-`c088649`, surface = balanced fixture + `claimed_sum` binding + spread sampler/k-aware
+  budget). 5 dimensions — soundness×2, hiding/two-witness, code-isolation, budget-arithmetic — 20 claims,
+  **1 confirmed, 19 refuted. Zero soundness, zero hiding, zero scope breaks.** The one confirmed finding was
+  an **implementation-isolation** defect, not a protocol weakness: the `logup_balanced` module was declared
+  un-gated in `lib.rs`, so with `statistical-zk` OFF its feature-only helpers/imports became dead-code and
+  the repo's `-Dwarnings` broke the transparent examples build — a feature-gating-invariant violation
+  (auditor duty, §7). Fixed by gating the module (`3454061`), verified both ways (feature-off build clean,
+  feature-on test green). Refuted highlights, each by independent skeptic: `claimed_sum` is structurally
+  pinned by the LogUp boundary constraint and verifier-supplied (never proof-sourced), so the gate living in
+  a test wrapper is correct design; the default-zero `claimed_sum()` cannot restore adaptivity; the
+  composition-only fixture opens public constants (no witness to leak). The budget-arithmetic dimension
+  refuted all its own probes; the skeptic additionally flagged one adversary's "rank deficient by 192"
+  figure as **fabricated** (absent from the repo) — recorded here as a reminder that committee numbers
+  require code-grounding. Per-chunk sufficiency remains open GAP B (O-B3), by design.
+
 ---
 
 ## 6. Milestones & gates
