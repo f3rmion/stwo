@@ -286,7 +286,7 @@ mod tests {
         use rand::SeedableRng;
         use stwo::prover::poly::circle::PolyOps;
         use stwo::prover::prove_zk;
-        use stwo::prover::statistical_zk::{mask_column, WitnessMaskConfig};
+        use stwo::prover::statistical_zk::{mask_column, sample_salt_column, WitnessMaskConfig};
 
         // [F : F_q] for QM31 over M31; an OODS opening of a secure value charges e.
         const E: usize = 4;
@@ -345,26 +345,31 @@ mod tests {
             })
             .collect_vec();
 
-        // Base trace: masked column by column with independent randomizers.
-        let masked_trace = generate_trace::<FIB_SEQUENCE_LENGTH, SimdBackend>(&inputs)
+        // Base trace: masked column by column with independent randomizers, plus a
+        // leaf-size Layer-0 salt column so the base-trace tree's leaf hashes hide.
+        let mut masked_trace = generate_trace::<FIB_SEQUENCE_LENGTH, SimdBackend>(&inputs)
             .into_iter()
             .map(|eval| {
                 let coeffs = eval.interpolate_with_twiddles(&twiddles);
                 mask_column(&coeffs, mask_config, &mut rng).unwrap()
             })
             .collect_vec();
+        masked_trace.push(sample_salt_column::<SimdBackend, _>(comp_log, &mut rng));
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_polys(masked_trace);
         tree_builder.commit(prover_channel);
 
         // `eval.log_size()` stays `n` (the constraint vanishing domain); the
-        // component declares the enlarged committed trace geometry separately.
+        // component declares the enlarged committed trace geometry and the one
+        // Layer-0 salt column on the base-trace tree (tree 1; preprocessed tree 0
+        // is public, no salt).
         let component = WideFibWithPpComponent::<FIB_SEQUENCE_LENGTH>::new(
             &mut TraceLocationAllocator::default(),
             WideFibWithPpEval::<FIB_SEQUENCE_LENGTH> { log_n_rows: n },
             SecureField::zero(),
         )
-        .with_masked_trace_log_size(masked_log_size);
+        .with_masked_trace_log_size(masked_log_size)
+        .with_salt_columns_per_tree(vec![0, 1]);
 
         // `t` carries this many coefficients per coordinate; must fit the masked
         // composition coefficient space (2^comp_log).

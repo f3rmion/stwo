@@ -122,6 +122,12 @@ pub struct FrameworkComponent<C: FrameworkEval> {
     /// behaviour (committed size == vanishing size).
     #[cfg(feature = "statistical-zk")]
     masked_trace_log_size: Option<u32>,
+    /// Number of Layer-0 hiding-Merkle salt columns appended to each commitment
+    /// tree (indexed by tree). Salt columns are committed at leaf size, carry no
+    /// OODS sample point, and are read by no constraint; they make each tree's leaf
+    /// hashes hiding. Empty ⇒ no salt columns.
+    #[cfg(feature = "statistical-zk")]
+    salt_columns_per_tree: Vec<usize>,
 }
 
 impl<E: FrameworkEval> FrameworkComponent<E> {
@@ -164,7 +170,22 @@ impl<E: FrameworkEval> FrameworkComponent<E> {
             claimed_sum,
             #[cfg(feature = "statistical-zk")]
             masked_trace_log_size: None,
+            #[cfg(feature = "statistical-zk")]
+            salt_columns_per_tree: Vec::new(),
         }
+    }
+
+    /// Declares Layer-0 hiding-Merkle salt columns appended to each commitment tree
+    /// (indexed by tree; preprocessed is tree 0 and is public, so its entry is
+    /// normally 0). The caller must commit exactly this many extra leaf-size random
+    /// columns, after the real columns, to the matching trees.
+    ///
+    /// CANDIDATE: this only wires the salt geometry; the leakage bound is the
+    /// cryptographer's, not certified here.
+    #[cfg(feature = "statistical-zk")]
+    pub fn with_salt_columns_per_tree(mut self, salt_columns_per_tree: Vec<usize>) -> Self {
+        self.salt_columns_per_tree = salt_columns_per_tree;
+        self
     }
 
     /// Declares that the trace columns are committed at the enlarged `log_size`
@@ -247,6 +268,15 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         self.eval.max_constraint_log_degree_bound()
     }
 
+    // Excludes the Layer-0 salt columns (committed but unread by constraints): the
+    // real trace columns are all at the masked / constraint column size, so their
+    // larger salt siblings must not inflate evaluation-mode inference.
+    #[cfg(feature = "statistical-zk")]
+    fn constraint_trace_log_size(&self) -> u32 {
+        self.masked_trace_log_size
+            .unwrap_or_else(|| self.eval.log_size())
+    }
+
     fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
         // Trace columns are committed at the masked (enlarged) size when Layer-1
         // masking is active; otherwise at the constraint log size.
@@ -269,6 +299,18 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
             .map(|_| column_log_size)
             .collect();
 
+        // Append Layer-0 salt columns (at leaf size) to each tree that requested
+        // them; they carry no OODS sample (see `mask_points`).
+        #[cfg(feature = "statistical-zk")]
+        {
+            let salt_log_size = self.max_constraint_log_degree_bound();
+            for (tree_index, &n_salt) in self.salt_columns_per_tree.iter().enumerate() {
+                for _ in 0..n_salt {
+                    log_degree_bounds[tree_index].push(salt_log_size);
+                }
+            }
+        }
+
         log_degree_bounds
     }
 
@@ -286,12 +328,22 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         #[cfg(not(feature = "statistical-zk"))]
         let step_log_degree_bound = max_log_degree_bound;
         let trace_step = CanonicCoset::new(step_log_degree_bound).step();
-        self.info.mask_offsets.as_ref().map_cols(|col_offsets| {
+        #[cfg_attr(not(feature = "statistical-zk"), allow(unused_mut))]
+        let mut points = self.info.mask_offsets.as_ref().map_cols(|col_offsets| {
             col_offsets
                 .iter()
                 .map(|offset| point + trace_step.mul_signed(*offset).into_ef())
                 .collect()
-        })
+        });
+        // Layer-0 salt columns get no OODS sample (empty), matching the sizes added
+        // in `trace_log_degree_bounds`.
+        #[cfg(feature = "statistical-zk")]
+        for (tree_index, &n_salt) in self.salt_columns_per_tree.iter().enumerate() {
+            for _ in 0..n_salt {
+                points[tree_index].push(vec![]);
+            }
+        }
+        points
     }
 
     fn preprocessed_column_indices(&self) -> ColumnVec<usize> {

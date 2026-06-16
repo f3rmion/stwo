@@ -448,7 +448,7 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
     use rand::SeedableRng;
     use stwo::core::fri::FriConfig;
     use stwo::prover::prove_zk;
-    use stwo::prover::statistical_zk::{mask_column, WitnessMaskConfig};
+    use stwo::prover::statistical_zk::{mask_column, sample_salt_column, WitnessMaskConfig};
 
     // [F : F_q] for QM31 over M31.
     const E: usize = 4;
@@ -535,7 +535,10 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
         .map(|eval| mask_column(&eval.interpolate_with_twiddles(&twiddles), mask_config, &mut rng).unwrap())
         .collect_vec();
     let mut tree_builder = commitment_scheme.tree_builder();
+    // Capture the trace location from the real columns only, then append the
+    // leaf-size Layer-0 salt column AFTER (so the AIR never reads it).
     let base_trace_location = tree_builder.extend_polys(base_polys);
+    tree_builder.extend_polys(vec![sample_salt_column::<SimdBackend, _>(comp_log, &mut rng)]);
     tree_builder.commit(channel);
 
     // Draw lookup element.
@@ -557,6 +560,7 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
         .collect_vec();
     let mut tree_builder = commitment_scheme.tree_builder();
     let interaction_trace_location = tree_builder.extend_polys(interaction_polys);
+    tree_builder.extend_polys(vec![sample_salt_column::<SimdBackend, _>(comp_log, &mut rng)]);
     tree_builder.commit(channel);
 
     // `eval.log_size()` stays `n` (constraint vanishing domain); the component
@@ -573,7 +577,10 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
         },
         claimed_sum,
     )
-    .with_masked_trace_log_size(masked_log_size);
+    .with_masked_trace_log_size(masked_log_size)
+    // One Layer-0 salt column on the base-trace (tree 1) and interaction (tree 2)
+    // trees; preprocessed (tree 0) is public, no salt.
+    .with_salt_columns_per_tree(vec![0, 1, 1]);
 
     let randomizer_dimension = 1 << masked_log_size;
     let proof = prove_zk::<SimdBackend, Blake2sMerkleChannel>(

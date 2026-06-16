@@ -42,13 +42,9 @@ impl EvaluationMode {
     pub fn infer(components: &[&dyn Component], log_blowup_factor: u32) -> Self {
         let mut common_log_expansion: Option<u32> = None;
         for c in components {
-            let trace_log_size = c
-                .trace_log_degree_bounds()
-                .iter()
-                .flatten()
-                .copied()
-                .max()
-                .unwrap_or(0);
+            // Use the constraint trace size (excludes auxiliary columns such as
+            // statistical-ZK salt columns the constraints never read).
+            let trace_log_size = c.constraint_trace_log_size();
             let constraint_log_degree = c
                 .max_constraint_log_degree_bound()
                 .saturating_sub(trace_log_size);
