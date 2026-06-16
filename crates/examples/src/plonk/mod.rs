@@ -421,6 +421,173 @@ pub fn prove_fibonacci_plonk_zk(
     (component, proof)
 }
 
+/// Statistical-ZK PLONK prover with Layer-1 trace masking.
+///
+/// Base-trace columns are committed as `ŵ = w + v_H·r` (witness-hiding off `H`);
+/// when `mask_interaction` is set the LogUp interaction (cumulative-sum) columns
+/// are masked too, otherwise they are only LIFTED to the masked geometry. The
+/// public preprocessed columns are always lifted, never masked. This exercises
+/// masked trace columns read at NONZERO offsets (the LogUp constraint reads the
+/// cumulative-sum column at the current and previous row). `randomizer_seed` seeds
+/// the trace-mask and composition-randomizer CSPRNG.
+///
+/// CANDIDATE: wires the masking MECHANISM (prove_zk accepts the masked trace); it
+/// does NOT certify the absence of leakage.
+#[cfg(feature = "statistical-zk")]
+#[allow(clippy::type_complexity)]
+pub fn prove_fibonacci_plonk_zk_trace_masked(
+    log_n_rows: u32,
+    randomizer_seed: u64,
+    mask_interaction: bool,
+) -> (
+    PlonkComponent,
+    PcsConfig,
+    stwo::core::proof::ExtendedStarkProof<Blake2sMerkleHasher>,
+) {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use stwo::core::fri::FriConfig;
+    use stwo::prover::prove_zk;
+    use stwo::prover::statistical_zk::{mask_column, WitnessMaskConfig};
+
+    // [F : F_q] for QM31 over M31.
+    const E: usize = 4;
+    assert!(log_n_rows >= LOG_N_LANES);
+    let n = log_n_rows;
+    let log_blowup = 1;
+    let n_d = 64;
+    // The LogUp interaction columns are read at two OODS points; size the mask for
+    // that larger budget and apply it uniformly to every masked column.
+    let h_col = E * 2 + n_d;
+    let masked_log_size = {
+        let need = (1usize << n) + h_col.next_power_of_two();
+        let mut l = n + 1;
+        while (1usize << l) < need {
+            l += 1;
+        }
+        l
+    };
+    // PLONK has composition_log_degree_bound = n + 1, so masked composition is
+    // masked_log_size + 1; force the lifting to cover the taller unsplit `t` tree.
+    let comp_log = masked_log_size + 1;
+    let config = PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(5, log_blowup, n_d, 1),
+        lifting_log_size: Some(comp_log + log_blowup),
+    };
+
+    // Prepare the fibonacci circuit (identical to the transparent harness).
+    let mut fib_values = vec![BaseField::one(), BaseField::one()];
+    for _ in 0..(1 << n) {
+        fib_values.push(fib_values[fib_values.len() - 1] + fib_values[fib_values.len() - 2]);
+    }
+    let range = 0..(1 << n);
+    let mut circuit = PlonkCircuitTrace {
+        mult: range.clone().map(|_| 2.into()).collect(),
+        a_wire: range.clone().map(|i| i.into()).collect(),
+        b_wire: range.clone().map(|i| (i + 1).into()).collect(),
+        c_wire: range.clone().map(|i| (i + 2).into()).collect(),
+        op: range.clone().map(|_| 1.into()).collect(),
+        a_val: range.clone().map(|i| fib_values[i]).collect(),
+        b_val: range.clone().map(|i| fib_values[i + 1]).collect(),
+        c_val: range.clone().map(|i| fib_values[i + 2]).collect(),
+    };
+    circuit.mult.set((1 << n) - 1, 0.into());
+    circuit.mult.set((1 << n) - 2, 1.into());
+
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(comp_log + log_blowup)
+            .circle_domain()
+            .half_coset,
+    );
+
+    let channel = &mut Blake2sChannel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mask_config = WitnessMaskConfig::new(n, masked_log_size, h_col).unwrap();
+    mask_config.check_leakage_budget(h_col).unwrap();
+    let mut rng = StdRng::seed_from_u64(randomizer_seed);
+    let trace_domain = CanonicCoset::new(n).circle_domain();
+
+    // Preprocessed trace: public, only LIFTED to the masked geometry.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let constant_polys = [
+        circuit.a_wire.clone(),
+        circuit.b_wire.clone(),
+        circuit.c_wire.clone(),
+        circuit.op.clone(),
+    ]
+    .into_iter()
+    .map(|col| {
+        CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(trace_domain, col)
+            .interpolate_with_twiddles(&twiddles)
+            .extend(masked_log_size)
+    })
+    .collect_vec();
+    let constants_trace_location = tree_builder.extend_polys(constant_polys);
+    tree_builder.commit(channel);
+
+    // Base trace: masked.
+    let base_polys = gen_trace(n, &circuit)
+        .into_iter()
+        .map(|eval| mask_column(&eval.interpolate_with_twiddles(&twiddles), mask_config, &mut rng).unwrap())
+        .collect_vec();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let base_trace_location = tree_builder.extend_polys(base_polys);
+    tree_builder.commit(channel);
+
+    // Draw lookup element.
+    let lookup_elements = PlonkLookupElements::draw(channel);
+
+    // Interaction trace: masked when requested, otherwise lifted (still committed
+    // at the masked geometry, read at nonzero offsets by the LogUp constraint).
+    let (interaction_trace, claimed_sum) = gen_interaction_trace(n, &circuit, &lookup_elements.0);
+    let interaction_polys = interaction_trace
+        .into_iter()
+        .map(|eval| {
+            let coeffs = eval.interpolate_with_twiddles(&twiddles);
+            if mask_interaction {
+                mask_column(&coeffs, mask_config, &mut rng).unwrap()
+            } else {
+                coeffs.extend(masked_log_size)
+            }
+        })
+        .collect_vec();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let interaction_trace_location = tree_builder.extend_polys(interaction_polys);
+    tree_builder.commit(channel);
+
+    // `eval.log_size()` stays `n` (constraint vanishing domain); the component
+    // declares the enlarged committed trace geometry separately.
+    let component = PlonkComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PlonkEval {
+            log_n_rows: n,
+            lookup_elements,
+            claimed_sum,
+            base_trace_location,
+            interaction_trace_location,
+            constants_trace_location,
+        },
+        claimed_sum,
+    )
+    .with_masked_trace_log_size(masked_log_size);
+
+    let randomizer_dimension = 1 << masked_log_size;
+    let proof = prove_zk::<SimdBackend, Blake2sMerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+        &mut rng,
+        randomizer_dimension,
+    )
+    .unwrap();
+
+    (component, config, proof)
+}
+
 /// Preprocessed columns for describing a plonk circuit.
 /// Each plonk gate is described by input wires `a_wire`, `b_wire`, output wire `c_wire`, and
 /// operation `op`.
@@ -504,7 +671,9 @@ mod zk_tests {
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use stwo::core::verifier::verify_zk;
 
-    use crate::plonk::{prove_fibonacci_plonk_zk, PlonkLookupElements};
+    use crate::plonk::{
+        prove_fibonacci_plonk_zk, prove_fibonacci_plonk_zk_trace_masked, PlonkLookupElements,
+    };
 
     /// Builds the PLONK PcsConfig with the FRI lifting forced to accommodate the
     /// taller unsplit composition-randomizer tree. The PLONK AIR has
@@ -606,5 +775,53 @@ mod zk_tests {
         // Both proofs must verify under the same redraw protocol.
         verify_plonk_zk(&component_a, proof_a.proof, config);
         verify_plonk_zk(&component_b, proof_b.proof, config);
+    }
+
+    /// Layer-1 trace masking with the LogUp interaction columns LIFTED (not yet
+    /// masked): exercises masked base-trace columns AND nonzero-offset reads (the
+    /// LogUp constraint reads the cumulative-sum column at current/previous row).
+    /// Validates the per-offset OODS translation for the masked geometry.
+    #[test]
+    fn test_simd_plonk_prove_zk_trace_masked() {
+        for log_n_rows in 6..=7 {
+            let (component, config, extended_proof) =
+                prove_fibonacci_plonk_zk_trace_masked(log_n_rows, 0, false);
+            verify_plonk_zk(&component, extended_proof.proof, config);
+        }
+    }
+
+    /// Full Layer-1 masking for a LogUp AIR: base-trace AND interaction columns
+    /// committed as `ŵ = w + v_H·r`. CANDIDATE, mechanism only.
+    #[test]
+    fn test_simd_plonk_prove_zk_trace_and_interaction_masked() {
+        for log_n_rows in 6..=7 {
+            let (component, config, extended_proof) =
+                prove_fibonacci_plonk_zk_trace_masked(log_n_rows, 0, true);
+            verify_plonk_zk(&component, extended_proof.proof, config);
+        }
+    }
+
+    /// Mask-isolating randomization check: same circuit, two randomizer seeds. The
+    /// masked base-trace (tree 1) and interaction (tree 2) OODS openings must
+    /// differ — with the witness fixed, only the trace mask `v_H·r` can cause that
+    /// (a no-op mask would commit the identical trace and produce identical
+    /// openings). Mechanism evidence, NOT a no-leak certificate.
+    #[test]
+    fn test_plonk_trace_masking_randomizes_openings() {
+        let log_n_rows = 6;
+        let (component_a, config_a, proof_a) =
+            prove_fibonacci_plonk_zk_trace_masked(log_n_rows, 1, true);
+        let (component_b, config_b, proof_b) =
+            prove_fibonacci_plonk_zk_trace_masked(log_n_rows, 99999, true);
+        assert_ne!(
+            proof_a.proof.sampled_values[1], proof_b.proof.sampled_values[1],
+            "masked base-trace OODS openings must differ across randomizer seeds"
+        );
+        assert_ne!(
+            proof_a.proof.sampled_values[2], proof_b.proof.sampled_values[2],
+            "masked interaction OODS openings must differ across randomizer seeds"
+        );
+        verify_plonk_zk(&component_a, proof_a.proof, config_a);
+        verify_plonk_zk(&component_b, proof_b.proof, config_b);
     }
 }

@@ -270,13 +270,21 @@ in §6–§10 where they conflict. **This remains a candidate; certification sti
   the composition grow to the masked geometry, and the OODS-point vanishing degree is reduced by the
   masking enlargement so it equals `v_H` in the trace's lifted opening frame. The public preprocessed
   columns are LIFTED (not masked). The runtime leakage budget (`check_leakage_budget`) is invoked
-  fail-closed (still a dimension check, not derived from real opening counts). Validated on the WideFib
-  AIR (toy, no LogUp): masked `prove_zk`/`verify_zk` accept, and the trace openings randomize under the
-  mask. CANDIDATE — mechanism only, no leakage certificate.
-- **Still NOT built / scoped to later increments:** masking of LogUp **interaction** columns (so AIRs
-  with a lookup argument are not yet trace-hidden); masked trace columns with **nonzero mask offsets**
-  (transition constraints reading shifted rows) — currently rejected fail-closed, pending a per-offset
-  OODS translation; and **Layer 0 (hiding/salted Merkle)**.
+  fail-closed (still a dimension check, not derived from real opening counts). CANDIDATE — mechanism
+  only, no leakage certificate.
+- **Nonzero-offset (transition) AIRs and LogUp interaction columns are now also wired.** Masked columns
+  are committed `m − n` log sizes above the constraint domain and opened in that lifted frame, so the
+  mask-offset translation steps by the constraint (trace) domain coset seen in the lifted frame —
+  degree `max_log_degree_bound − (m − n)`, the same reduction as the vanishing — instead of the
+  composition coset. (The prover-side offset stepping already keys off the trace log size `n`, so it is
+  unchanged.) This lets transition constraints (shifted-row reads) and the LogUp cumulative-sum columns
+  be masked. Validated end to end: WideFib (no LogUp, offset-0), and PLONK with real LogUp — base trace
+  AND interaction columns committed as `ŵ = w + v_H·r` (the cumulative-sum read at current/previous
+  row), masked `prove_zk`/`verify_zk` accept, and the trace + interaction openings randomize under the
+  mask. CANDIDATE — mechanism only.
+- **Still NOT built:** **Layer 0 (hiding/salted Merkle)**; a leakage budget derived from real
+  OODS/FRI opening counts (currently a conservative caller-supplied dimension); and the cryptographer's
+  no-leak certificate (the joint full-rank / Vandermonde blinding bound, §6 [GAP A] / §7 [GAP B]).
 
 ### B.1 The split multiplier never vanishes on the query domain (the §7 π-edge is closed)
 

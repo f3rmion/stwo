@@ -180,25 +180,22 @@ impl<E: FrameworkEval> FrameworkComponent<E> {
             masked_trace_log_size,
             self.eval.log_size()
         );
-        // Fail closed on nonzero mask offsets. The OODS mask-offset translation
-        // (`mask_points`) steps by the constraint-domain coset, but a masked column
-        // is opened in its enlarged (lifted) frame; the per-offset translation is
-        // not yet adjusted for that frame, so a transition constraint reading a
-        // shifted row would be evaluated at the wrong point. Only offset-0 AIRs may
-        // currently commit masked trace columns.
-        let all_offsets_zero = self
-            .info
-            .mask_offsets
-            .iter()
-            .all(|tree| tree.iter().all(|col| col.iter().all(|&offset| offset == 0)));
-        assert!(
-            all_offsets_zero,
-            "masked trace columns with nonzero mask offsets are not yet supported: \
-             the per-offset OODS translation is not adjusted for the enlarged \
-             committed geometry"
-        );
         self.masked_trace_log_size = Some(masked_trace_log_size);
         self
+    }
+
+    /// Constraint (trace) domain log degree bound at which masked-trace OODS
+    /// quantities — the mask-offset step and the constraint vanishing — must be
+    /// taken. A masked trace is committed `masked - log_size` levels above the
+    /// constraint domain and opened in that lifted frame, so these quantities are
+    /// reduced from `max_log_degree_bound` by the masking enlargement. Without
+    /// masking this is exactly `max_log_degree_bound`.
+    #[cfg(feature = "statistical-zk")]
+    fn masked_constraint_log_degree_bound(&self, max_log_degree_bound: u32) -> u32 {
+        match self.masked_trace_log_size {
+            Some(masked) => max_log_degree_bound - (masked - self.eval.log_size()),
+            None => max_log_degree_bound,
+        }
     }
 
     pub fn trace_locations(&self) -> &[TreeSubspan] {
@@ -280,7 +277,15 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         point: CirclePoint<SecureField>,
         max_log_degree_bound: u32,
     ) -> TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>> {
-        let trace_step = CanonicCoset::new(max_log_degree_bound).step();
+        // For masked trace columns the mask-offset step must be the constraint
+        // (trace) domain step seen in the lifted opening frame, not the composition
+        // step — otherwise a shifted-row (transition) mask lands on the wrong
+        // neighbor. Without masking this is exactly `max_log_degree_bound`.
+        #[cfg(feature = "statistical-zk")]
+        let step_log_degree_bound = self.masked_constraint_log_degree_bound(max_log_degree_bound);
+        #[cfg(not(feature = "statistical-zk"))]
+        let step_log_degree_bound = max_log_degree_bound;
+        let trace_step = CanonicCoset::new(step_log_degree_bound).step();
         self.info.mask_offsets.as_ref().map_cols(|col_offsets| {
             col_offsets
                 .iter()
@@ -312,14 +317,11 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         // The masked trace is committed `masked - log_size` levels above the
         // constraint (vanishing) domain, so its OODS opening is lifted by that many
         // doublings. The constraint vanishing must be taken at the matching reduced
-        // degree, `max_log_degree_bound - (masked - log_size)`, so that
-        // `coset_vanishing(.., point)` equals `v_H` evaluated in the trace's lifted
-        // opening frame. Without masking this is exactly `max_log_degree_bound`.
+        // degree so that `coset_vanishing(.., point)` equals `v_H` evaluated in the
+        // trace's lifted opening frame. Without masking this is exactly
+        // `max_log_degree_bound`.
         #[cfg(feature = "statistical-zk")]
-        let vanishing_log_degree_bound = match self.masked_trace_log_size {
-            Some(masked) => max_log_degree_bound - (masked - self.eval.log_size()),
-            None => max_log_degree_bound,
-        };
+        let vanishing_log_degree_bound = self.masked_constraint_log_degree_bound(max_log_degree_bound);
         #[cfg(not(feature = "statistical-zk"))]
         let vanishing_log_degree_bound = max_log_degree_bound;
 
