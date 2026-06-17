@@ -252,22 +252,19 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             query_positions,
             unsorted_query_locations,
         } = fri_prover.decommit(channel);
-        // Build the query position tree.
-        let preprocessed_query_positions = prepare_preprocessed_query_positions(
-            &query_positions,
-            lifting_log_size,
-            self.trees[0].commitment.layers.len() as u32 - 1,
-        );
+        // Build the query position tree: remap the FRI query positions down to
+        // each tree's own (possibly shorter) committed height. A tree at the full
+        // lifting height gets the positions back unchanged, so this matches the
+        // previous "preprocessed-tree-only" handling when all trees share a height.
         let query_positions_tree = TreeVec::new(
             self.trees
                 .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    if i == 0 {
-                        preprocessed_query_positions.as_slice()
-                    } else {
-                        query_positions.as_slice()
-                    }
+                .map(|tree| {
+                    prepare_preprocessed_query_positions(
+                        &query_positions,
+                        lifting_log_size,
+                        tree.commitment.layers.len() as u32 - 1,
+                    )
                 })
                 .collect::<Vec<_>>(),
         );
@@ -276,7 +273,7 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             .trees
             .as_ref()
             .zip_eq(query_positions_tree)
-            .map(|(tree, query_positions)| tree.decommit(query_positions))
+            .map(|(tree, query_positions)| tree.decommit(&query_positions))
             .0
             .into_iter()
             .map(|(v, x)| (v, x.decommitment, x.aux))
