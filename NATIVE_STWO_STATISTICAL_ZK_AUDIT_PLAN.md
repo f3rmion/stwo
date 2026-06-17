@@ -305,6 +305,21 @@ obligation.
   mutated the working tree (the PROBE + a split-recombine repro test) — a reminder that committee runs can
   leave self-inflicted scratch that must be triaged out, not committed.
 
+- **Round 4** (surface = the PERFORMANCE changes + regressions). Two landed perf commits: batched Layer-1
+  masking (`4c096cf`, `mask_columns` hoisting the per-column-shared twiddles + `v_H`) and per-tree FRI
+  query-position routing (`f315d4c`). 4 dimensions — routing-soundness, masking-equivalence, masking-hiding,
+  regression-interaction. 6 claims; **zero soundness, zero hiding, zero correctness, zero scope breaks.**
+  Strongest verifications, all code-grounded: a skeptic's 548,862-case check proved the per-tree remap binds
+  exactly the value FRI consumes (`prepare(prepare(raw,L,h),h,lc) == prepare(raw,L,lc)`) and is the identity
+  for full-height trees, so `f315d4c` changes no committed root and the transparent path stays byte-identical;
+  `mask_columns` is bit-identical to the old per-column `mask_column` (RNG order/count preserved, hoisted data
+  is RNG-free) with the only behavioral delta (an error-variant ordering) proven unreachable via disjoint
+  cosets; batching preserves per-column randomizer independence. **Anti-fabrication worked:** multiple
+  skeptics flagged adversaries citing tests "not in the committed tree" and a phantom test name
+  (`temp_redteam_intersect_unreachable_scan`) from a STALE compiled binary; verified against `HEAD` (grep
+  count 0, not tracked) — the phantom does not exist in committed code, no fix needed. Round 4 added no
+  commits (no real findings).
+
 ---
 
 ## 6. Milestones & gates
