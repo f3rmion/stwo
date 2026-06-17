@@ -2,24 +2,31 @@
 //!
 //! Models the single-DCO, principal-book RFQ SHAPE from the Infinite architecture:
 //! a batch of `N` fills against the DCO principal book (no CLOB, no resting orders).
-//! Per fill the circuit enforces the signed-notional settlement ARITHMETIC (boolean
-//! side, `signed_size`, `delta`); a BALANCED LogUp proves the user ledger
+//! Per fill the circuit enforces (i) the signed-notional settlement ARITHMETIC
+//! (boolean side, `signed_size`, `delta = signed_size · price`) and (ii) that the
+//! price equals the PUBLIC canonical mark (`price = mark`, the `mark` carried as a
+//! preprocessed public column — band = 0). A BALANCED LogUp proves the user ledger
 //! `{(acct, delta)}` and the principal ledger `{(pacct, pdelta)}` are the SAME
 //! MULTISET — a reconciliation / permutation argument. Equal multisets ⇒
 //! `claimed_sum = 0`, the leak-free shape a verifier enforces with
 //! `assert_lookup_balanced`. Under the ZK path the per-fill witness (account, side,
 //! size, delta) is masked (Layer-1), hiding who traded what.
 //!
-//! HONEST SCOPE (v1 example circuit — read before reusing). Both ledgers are
-//! PROVER-AUTHORED witnesses (the generator builds the principal ledger as a
-//! permutation of the user ledger), so the balanced LogUp proves only that the
-//! prover's two lists are the same multiset — NOT collateral conservation (`Σδ = 0`
-//! is NOT enforced) and NOT settlement against any externally-committed book state.
-//! Production soundness additionally needs: (a) binding `(pacct, pdelta)` and the
-//! fills to a public/preprocessed book commitment / state roots (the
-//! `infinite-proof` state-transition proof's job); and (b) the mark-band range
-//! check (price within the canonical mark's signed bounds, a range-LogUp). Both are
-//! out of v1 scope.
+//! HONEST SCOPE (example circuit — read before reusing).
+//! * The canonical mark is a PREPROCESSED public column; like a PLONK circuit's
+//!   preprocessed wires, its commitment must be pinned/agreed out-of-band (the
+//!   verifier here trusts `commitments[0]`). The `price = mark` constraint then
+//!   pins every fill's settlement price to that public input.
+//! * Both LEDGERS are still PROVER-AUTHORED witnesses (the generator builds the
+//!   principal ledger as a permutation of the user ledger), so the balanced LogUp
+//!   proves only that the prover's two lists are the same multiset — NOT collateral
+//!   conservation (`Σδ = 0` is NOT enforced) and NOT settlement against an
+//!   externally-committed book state.
+//! REMAINING for a production settlement proof: (a) bind `(pacct, pdelta)` / the
+//!   fills to a committed book / state roots (the `infinite-proof` state-transition
+//!   proof's job — via Merkle membership or a per-account net, to keep fills
+//!   private); and (b) the SIGNED-BAND variant (`|price − mark| ≤ band`, a
+//!   range-LogUp) instead of the strict `band = 0` here.
 
 use num_traits::One;
 use stwo::core::channel::Blake2sChannel;
@@ -36,12 +43,25 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::logup::LookupElements;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
     TraceLocationAllocator,
 };
 
 pub type RfqComponent = FrameworkComponent<RfqEval>;
+
+/// The canonical mark for the batch — the single public price every fill executes
+/// at (band = 0; the signed-band variant is a v2 range-LogUp). Carried as a public
+/// preprocessed column so the prover cannot choose the settlement price.
+pub const CANONICAL_MARK: u32 = 100;
+
+/// Id of the public preprocessed `mark` column.
+fn mark_column_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "rfq_mark".to_string(),
+    }
+}
 
 // Ledger entries are (account, signed collateral delta) pairs.
 relation!(RfqLedger, 2);
@@ -73,6 +93,9 @@ impl FrameworkEval for RfqEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        // Public canonical mark (preprocessed): the price every fill must execute at.
+        let mark = eval.get_preprocessed_column(mark_column_id());
+
         let acct = eval.next_trace_mask();
         let side = eval.next_trace_mask();
         let size = eval.next_trace_mask();
@@ -82,6 +105,9 @@ impl FrameworkEval for RfqEval {
         let pacct = eval.next_trace_mask();
         let pdelta = eval.next_trace_mask();
 
+        // Every fill executes at the public canonical mark (band = 0). This binds
+        // the settlement price to a public input — the prover cannot choose it.
+        eval.add_constraint(price.clone() - mark);
         // side ∈ {0, 1} (buy / sell).
         eval.add_constraint(side.clone() * (E::F::one() - side.clone()));
         // signed_size = (1 - 2·side)·size  ⇒  signed_size = size - 2·side·size.
@@ -148,9 +174,9 @@ fn rfq_batch_impl(log_n_fills: u32, balanced: bool) -> RfqBatch {
         let a = BaseField::from_u32_unchecked(i % n_accounts);
         let s = BaseField::from_u32_unchecked(i & 1); // alternate buy / sell
         let sz = BaseField::from_u32_unchecked(1 + i % 997);
-        let pr = BaseField::from_u32_unchecked(100 + i % 53);
+        let pr = BaseField::from_u32_unchecked(CANONICAL_MARK); // every fill at the mark
         let ss = (one - (s + s)) * sz; // (1 - 2·side)·size
-        let d = ss * pr; // signed notional
+        let d = ss * pr; // signed notional = signed_size · mark
         acct.push(a);
         side.push(s);
         size.push(sz);
@@ -179,6 +205,21 @@ fn rfq_batch_impl(log_n_fills: u32, balanced: bool) -> RfqBatch {
         pacct: pacct.into_iter().collect(),
         pdelta: pdelta.into_iter().collect(),
     }
+}
+
+/// The public preprocessed trace: a single `mark` column, constant at the canonical
+/// mark on every row. Both prover and verifier build it from the public mark (in a
+/// deployment its commitment is the pinned public input), so the `price = mark`
+/// constraint pins every fill's settlement price.
+pub fn gen_preprocessed_trace(
+    log_n_fills: u32,
+) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    let n = 1usize << log_n_fills;
+    let domain = CanonicCoset::new(log_n_fills).circle_domain();
+    let mark: BaseColumn = (0..n)
+        .map(|_| BaseField::from_u32_unchecked(CANONICAL_MARK))
+        .collect();
+    vec![CircleEvaluation::new(domain, mark)]
 }
 
 /// The 8 base-trace columns in `RfqEval` order.
@@ -227,7 +268,7 @@ pub fn gen_interaction_trace(
     logup_gen.finalize_last()
 }
 
-/// Transparent prover for the RFQ batch-settlement AIR. Empty preprocessed tree,
+/// Transparent prover for the RFQ batch-settlement AIR. Preprocessed `mark` column,
 /// 8-column base trace, one interaction column.
 pub fn prove_rfq(
     log_n_fills: u32,
@@ -249,8 +290,9 @@ pub fn prove_rfq(
         CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
 
-    // Empty preprocessed tree (no public columns in v1).
-    let tree_builder = commitment_scheme.tree_builder();
+    // Preprocessed tree: the public canonical mark column.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(gen_preprocessed_trace(log_n_fills));
     tree_builder.commit(channel);
 
     // Base trace.
@@ -320,8 +362,9 @@ pub fn prove_rfq_zk(
         CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
     commitment_scheme.set_store_polynomials_coefficients();
 
-    // Empty preprocessed tree (no public columns in v1).
-    let tree_builder = commitment_scheme.tree_builder();
+    // Preprocessed tree: the public canonical mark column.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(gen_preprocessed_trace(log_n_fills));
     tree_builder.commit(channel);
 
     // Base trace.
@@ -433,8 +476,14 @@ pub fn prove_rfq_zk_trace_masked(
 
     let batch = gen_rfq_batch(n);
 
-    // Empty preprocessed tree (no public columns in v1).
-    let tree_builder = commitment_scheme.tree_builder();
+    // Preprocessed tree: the public canonical mark column, only LIFTED to the masked
+    // geometry (public, never masked).
+    let mark_lifted = gen_preprocessed_trace(n)
+        .into_iter()
+        .map(|eval| eval.interpolate_with_twiddles(&twiddles).extend(masked_log_size))
+        .collect::<Vec<_>>();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_polys(mark_lifted);
     tree_builder.commit(channel);
 
     // Base trace: mask all 8 fill columns (batched — shared twiddles + v_H), then a
