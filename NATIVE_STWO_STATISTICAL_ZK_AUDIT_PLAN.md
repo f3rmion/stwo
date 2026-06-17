@@ -320,6 +320,23 @@ obligation.
   count 0, not tracked) — the phantom does not exist in committed code, no fix needed. Round 4 added no
   commits (no real findings).
 
+- **Round 5** (surface = the new RFQ batch-settlement example circuit, `crates/examples/src/rfq/mod.rs`,
+  commits `36c4591` + `f2d82d2`). 4 dimensions — settlement-arithmetic soundness, conservation-gate
+  enforcement, witness-hiding, AIR honesty. 14 claims, **6 confirmed / 8 refuted**, clustering into TWO real
+  issues, both fixed in `7603c0a`: (a) **a genuine hiding under-provisioning** — the trace-masked RFQ prover
+  hard-coded `n_f = 1` (`h_col = e·1 + n_d = 68`) and reused that mask config for the interaction tree, but
+  the LogUp cumulative-sum column is read at two OODS points (offsets `[-1,0]`, `n_F = 2`), needing
+  `h_col = e·2 + n_d = 72` — the interaction columns were under-masked by 4 randomizer coefficients (the PLONK
+  harness sizes this correctly; the RFQ copied the wrong pattern). Fixed by sizing every masked column at 72.
+  (b) **doc/naming overstatement** — "conservation" (the LogUp is a multiset-permutation, `Σδ=0` is NOT
+  enforced), "settles against the DCO principal book" (both ledgers are prover-authored witnesses, unbound to
+  external state), "max degree 2" (the pair-batched LogUp is degree 3), "malicious operator cannot settle".
+  Fixed by an explicit HONEST-SCOPE header + corrected comments. No soundness break: the verifier accepts only
+  true multiset-equality + arithmetic statements; the RFQ is honestly an example circuit until public-input /
+  state-root binding and the mark-band range check (both deferred to v2). The refuted 8 included the
+  claimed_sum channel-binding (correctly verifier-bound), the negative test (honestly-scoped control), and the
+  several air-honesty over-escalations the skeptics down-graded to the doc fixes above.
+
 ---
 
 ## 6. Milestones & gates
