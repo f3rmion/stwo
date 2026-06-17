@@ -109,6 +109,18 @@ pub struct RfqBatch {
 /// (hence the same multiset) of the user ledger — so the conservation LogUp is
 /// balanced (`claimed_sum = 0`).
 pub fn gen_rfq_batch(log_n_fills: u32) -> RfqBatch {
+    rfq_batch_impl(log_n_fills, true)
+}
+
+/// Like [`gen_rfq_batch`] but the principal ledger does NOT reconcile: one entry is
+/// altered, so the user and principal multisets differ and the conservation LogUp
+/// is UNBALANCED (`claimed_sum != 0`). A correct verifier rejects it via the
+/// balanced gate. For negative tests.
+pub fn gen_rfq_batch_unbalanced(log_n_fills: u32) -> RfqBatch {
+    rfq_batch_impl(log_n_fills, false)
+}
+
+fn rfq_batch_impl(log_n_fills: u32, balanced: bool) -> RfqBatch {
     let n = 1usize << log_n_fills;
     let n_accounts = 64u32.min(n as u32).max(1);
     let one = BaseField::one();
@@ -138,7 +150,12 @@ pub fn gen_rfq_batch(log_n_fills: u32) -> RfqBatch {
     // Principal ledger: the same fills recorded by the book, in its own canonical
     // order (here a reversal). Same multiset ⇒ balanced reconciliation.
     let pacct: Vec<_> = (0..n).map(|i| acct[n - 1 - i]).collect();
-    let pdelta: Vec<_> = (0..n).map(|i| delta[n - 1 - i]).collect();
+    let mut pdelta: Vec<_> = (0..n).map(|i| delta[n - 1 - i]).collect();
+    if !balanced {
+        // Forge: the principal under-reports one fill's delta. The user and
+        // principal multisets no longer match ⇒ claimed_sum != 0.
+        pdelta[0] = pdelta[0] + BaseField::one();
+    }
 
     RfqBatch {
         acct: acct.into_iter().collect(),
@@ -335,6 +352,129 @@ pub fn prove_rfq_zk(
     (component, proof)
 }
 
+/// Full witness-hiding RFQ prover: Layer-1 masks the base-trace AND interaction
+/// columns (`ŵ = w + v_H·r`), so every off-domain / FRI-query opening of the
+/// per-fill witness (account, side, size, delta) is blinded. The public statement
+/// is the committed roots + `claimed_sum = 0` (the batch reconciles); WHO traded
+/// WHAT is hidden. CANDIDATE: wires the masking mechanism; the leakage bound is the
+/// cryptographer's, not certified here.
+#[cfg(feature = "statistical-zk")]
+pub fn prove_rfq_zk_trace_masked(
+    log_n_fills: u32,
+    randomizer_seed: u64,
+) -> (
+    RfqComponent,
+    PcsConfig,
+    stwo::core::proof::ExtendedStarkProof<Blake2sMerkleHasher>,
+) {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use stwo::core::fri::FriConfig;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::statistical_zk::{mask_columns, sample_salt_column, WitnessMaskConfig};
+    use stwo::prover::{prove_zk, CommitmentSchemeProver};
+
+    // [F : F_q] for QM31 over M31; a secure OODS opening charges e.
+    const E: usize = 4;
+    assert!(log_n_fills >= LOG_N_LANES);
+    let n = log_n_fills;
+    let log_blowup = 1;
+    let n_d = 64; // FRI queries
+    let n_f = 1; // base columns read at offset 0 only
+    let h_col = E * n_f + n_d;
+
+    // Masked geometry: smallest log size above `n` holding the trace plus the
+    // randomizer coefficient space.
+    let masked_log_size = {
+        let need = (1usize << n) + h_col.next_power_of_two();
+        let mut l = n + 1;
+        while (1usize << l) < need {
+            l += 1;
+        }
+        l
+    };
+    let comp_log = masked_log_size + 1;
+    let config = PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(5, log_blowup, n_d, 1),
+        lifting_log_size: Some(comp_log + log_blowup),
+    };
+
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(comp_log + log_blowup)
+            .circle_domain()
+            .half_coset,
+    );
+
+    let channel = &mut Blake2sChannel::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let mask_config = WitnessMaskConfig::new(n, masked_log_size, h_col).unwrap();
+    mask_config.check_leakage_budget(h_col).unwrap();
+    let mut rng = StdRng::seed_from_u64(randomizer_seed);
+
+    let batch = gen_rfq_batch(n);
+
+    // Empty preprocessed tree (no public columns in v1).
+    let tree_builder = commitment_scheme.tree_builder();
+    tree_builder.commit(channel);
+
+    // Base trace: mask all 8 fill columns (batched — shared twiddles + v_H), then a
+    // leaf-size Layer-0 salt column so the tree's leaf hashes hide.
+    let trace_coeffs = gen_trace(n, &batch)
+        .into_iter()
+        .map(|eval| eval.interpolate_with_twiddles(&twiddles))
+        .collect::<Vec<_>>();
+    let mut masked_trace = mask_columns(&trace_coeffs, mask_config, &mut rng).unwrap();
+    masked_trace.push(sample_salt_column::<SimdBackend, _>(comp_log, &mut rng));
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_polys(masked_trace);
+    tree_builder.commit(channel);
+
+    // Draw the ledger lookup elements.
+    let ledger = RfqLedger::draw(channel);
+
+    // Interaction trace: masked too (its openings are witness-derived), plus a salt.
+    let (interaction_trace, claimed_sum) = gen_interaction_trace(n, &batch, &ledger.0);
+    let interaction_coeffs = interaction_trace
+        .into_iter()
+        .map(|eval| eval.interpolate_with_twiddles(&twiddles))
+        .collect::<Vec<_>>();
+    let mut masked_interaction = mask_columns(&interaction_coeffs, mask_config, &mut rng).unwrap();
+    masked_interaction.push(sample_salt_column::<SimdBackend, _>(comp_log, &mut rng));
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_polys(masked_interaction);
+    tree_builder.commit(channel);
+
+    let component = RfqComponent::new(
+        &mut TraceLocationAllocator::default(),
+        RfqEval {
+            log_n_fills: n,
+            ledger,
+            claimed_sum,
+        },
+        claimed_sum,
+    )
+    .with_masked_trace_log_size(masked_log_size)
+    // No salt on the empty preprocessed tree (0); one each on the base-trace (tree 1)
+    // and interaction (tree 2) trees.
+    .with_salt_columns_per_tree(vec![0, 1, 1]);
+
+    let randomizer_dimension = 1 << masked_log_size;
+    let proof = prove_zk::<SimdBackend, Blake2sMerkleChannel>(
+        &[&component],
+        channel,
+        commitment_scheme,
+        &mut rng,
+        randomizer_dimension,
+    )
+    .unwrap();
+
+    (component, config, proof)
+}
+
 #[cfg(test)]
 mod tests {
     use num_traits::Zero;
@@ -384,7 +524,7 @@ mod zk_tests {
     use stwo::core::verifier::verify_zk;
     use stwo::prover::statistical_zk::assert_lookup_balanced;
 
-    use crate::rfq::{prove_rfq_zk, RfqComponent, RfqLedger};
+    use crate::rfq::{prove_rfq_zk, prove_rfq_zk_trace_masked, RfqComponent, RfqLedger};
 
     fn zk_config(log_n_fills: u32) -> PcsConfig {
         let log_blowup = 1;
@@ -435,5 +575,41 @@ mod zk_tests {
             );
             verify_rfq_zk(&component, extended_proof.proof, config);
         }
+    }
+
+    /// Full witness-hiding RFQ: Layer-1 masks the base-trace and interaction
+    /// columns, so the per-fill data is hidden while the batch still proves it
+    /// settled and reconciles (`claimed_sum = 0`). End-to-end prove/verify.
+    #[test]
+    fn test_rfq_settlement_prove_zk_trace_masked() {
+        for log_n_fills in 6..=8 {
+            let (component, config, extended_proof) = prove_rfq_zk_trace_masked(log_n_fills, 0);
+            verify_rfq_zk(&component, extended_proof.proof, config);
+        }
+    }
+
+    /// Negative control: an unreconciled batch (the principal ledger under-reports
+    /// one fill) has a nonzero `claimed_sum`, so the conservation gate rejects it —
+    /// a malicious operator cannot settle a batch whose ledgers do not balance.
+    #[test]
+    fn test_rfq_unreconciled_batch_rejected() {
+        use stwo::core::channel::Blake2sChannel;
+
+        use crate::rfq::{gen_interaction_trace, gen_rfq_batch_unbalanced};
+
+        let log_n_fills = 6;
+        // The lookup challenge's exact value is irrelevant to the imbalance.
+        let ledger = RfqLedger::draw(&mut Blake2sChannel::default());
+        let batch = gen_rfq_batch_unbalanced(log_n_fills);
+        let (_, claimed_sum) = gen_interaction_trace(log_n_fills, &batch, &ledger.0);
+
+        assert!(
+            !claimed_sum.is_zero(),
+            "an unreconciled RFQ batch must have a nonzero claimed_sum"
+        );
+        assert!(
+            assert_lookup_balanced(claimed_sum).is_err(),
+            "the conservation gate must reject an unreconciled batch"
+        );
     }
 }
