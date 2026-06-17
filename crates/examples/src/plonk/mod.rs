@@ -826,6 +826,45 @@ mod zk_tests {
         }
     }
 
+    /// Negative control for the Layer-1 masked-trace path: tampering one masked
+    /// base-trace OODS opening must make `verify_zk` REJECT. The other masked
+    /// tests only assert acceptance of honest proofs, so the reduced-degree
+    /// DEEP-ALI check on the masked geometry is otherwise never exercised on the
+    /// rejection path. (This demonstrates the verifier rejects an inconsistent
+    /// masked opening; it does NOT bound the cheating probability of an
+    /// adversarial masked column — that is the open GAP-A rank theorem.)
+    #[test]
+    fn test_plonk_zk_trace_masked_tampered_opening_rejected() {
+        use num_traits::One;
+        use stwo::core::fields::qm31::SecureField;
+
+        let log_n_rows = 6;
+        let (component, config, extended_proof) =
+            prove_fibonacci_plonk_zk_trace_masked(log_n_rows, 0, true);
+        let mut proof = extended_proof.proof;
+
+        // Tamper one masked base-trace (tree 1) OODS opening. Sampled values are
+        // absorbed into the channel before the FRI challenges, so any change both
+        // breaks the DEEP-ALI consistency check and desyncs Fiat-Shamir.
+        proof.0.sampled_values[1][0][0] = proof.0.sampled_values[1][0][0] + SecureField::one();
+
+        // Re-run the verify commit dance, but keep the Result instead of unwrapping.
+        let channel = &mut Blake2sChannel::default();
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
+        let lookup_elements = PlonkLookupElements::draw(channel);
+        assert_eq!(lookup_elements, component.lookup_elements);
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
+
+        let result = verify_zk(&[&component], channel, commitment_scheme, proof, false);
+        assert!(
+            result.is_err(),
+            "verifier must reject a tampered masked-trace opening"
+        );
+    }
+
     /// LogUp multiplicity leakage. The private multiplicities ride in the masked
     /// `mult` base-trace column (Layer 1), so their openings are blinded like any
     /// witness column. The one multiplicity-dependent quantity masking does NOT
