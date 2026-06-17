@@ -1,18 +1,25 @@
-//! RFQ batch-settlement AIR (witness-hiding target circuit).
+//! RFQ batch-settlement AIR (witness-hiding example circuit).
 //!
-//! Models the single-DCO, principal-book RFQ from the Infinite architecture: a
-//! batch of `N` fills settles against the DCO principal book (there is no CLOB and
-//! no resting orders — every user fill executes against the book). Per fill the
-//! circuit enforces the signed-notional settlement arithmetic; a BALANCED
-//! conservation LogUp reconciles the user ledger `{(acct, delta)}` against the
-//! principal ledger `{(pacct, pdelta)}`. Equal multisets ⇒ `claimed_sum = 0` — the
-//! leak-free shape a verifier enforces with `assert_lookup_balanced`. Under the ZK
-//! path the per-fill witness (account, size, price, delta) is masked (Layer-1), so
-//! the proof hides who traded what while proving the batch settled and reconciles.
+//! Models the single-DCO, principal-book RFQ SHAPE from the Infinite architecture:
+//! a batch of `N` fills against the DCO principal book (no CLOB, no resting orders).
+//! Per fill the circuit enforces the signed-notional settlement ARITHMETIC (boolean
+//! side, `signed_size`, `delta`); a BALANCED LogUp proves the user ledger
+//! `{(acct, delta)}` and the principal ledger `{(pacct, pdelta)}` are the SAME
+//! MULTISET — a reconciliation / permutation argument. Equal multisets ⇒
+//! `claimed_sum = 0`, the leak-free shape a verifier enforces with
+//! `assert_lookup_balanced`. Under the ZK path the per-fill witness (account, side,
+//! size, delta) is masked (Layer-1), hiding who traded what.
 //!
-//! v1 scope: settlement arithmetic + ledger reconciliation. The mark-band / range
-//! checks (price within the canonical mark's signed band) are a range-LogUp
-//! deferred to v2.
+//! HONEST SCOPE (v1 example circuit — read before reusing). Both ledgers are
+//! PROVER-AUTHORED witnesses (the generator builds the principal ledger as a
+//! permutation of the user ledger), so the balanced LogUp proves only that the
+//! prover's two lists are the same multiset — NOT collateral conservation (`Σδ = 0`
+//! is NOT enforced) and NOT settlement against any externally-committed book state.
+//! Production soundness additionally needs: (a) binding `(pacct, pdelta)` and the
+//! fills to a public/preprocessed book commitment / state roots (the
+//! `infinite-proof` state-transition proof's job); and (b) the mark-band range
+//! check (price within the canonical mark's signed bounds, a range-LogUp). Both are
+//! out of v1 scope.
 
 use num_traits::One;
 use stwo::core::channel::Blake2sChannel;
@@ -56,8 +63,12 @@ impl FrameworkEval for RfqEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Max constraint degree is 2 (e.g. `signed_size · price`), one above the
-        // trace domain.
+        // Max constraint degree is 3: the pair-batched LogUp multiplies two
+        // degree-1 denominators against the degree-1 interaction column. (The
+        // algebraic settlement constraints, e.g. `signed_size · price`, are degree
+        // 2.) The `+1` headroom suffices because a degree-3 constraint over a
+        // `2^log_size` trace yields a quotient that fits `2^(log_size + 1)` — same
+        // bound as the PLONK and logup_balanced examples.
         self.log_n_fills + 1
     }
 
@@ -80,9 +91,10 @@ impl FrameworkEval for RfqEval {
         // delta = signed_size · price (the user's signed collateral change).
         eval.add_constraint(delta.clone() - signed_size * price);
 
-        // Balanced conservation LogUp: the user ledger and the principal ledger
-        // must record the same multiset of (account, delta) entries. The principal
-        // book mirrors every fill, so a correct settlement reconciles to 0.
+        // Balanced reconciliation LogUp: proves the user ledger and the principal
+        // ledger record the SAME MULTISET of (account, delta) entries (a permutation
+        // argument) ⇒ claimed_sum = 0. NOTE: both ledgers are prover witnesses; this
+        // does NOT bind the principal side to an external book (see module header).
         eval.add_to_relation(RelationEntry::new(&self.ledger, E::EF::one(), &[acct, delta]));
         eval.add_to_relation(RelationEntry::new(&self.ledger, -E::EF::one(), &[pacct, pdelta]));
 
@@ -380,8 +392,12 @@ pub fn prove_rfq_zk_trace_masked(
     let n = log_n_fills;
     let log_blowup = 1;
     let n_d = 64; // FRI queries
-    let n_f = 1; // base columns read at offset 0 only
-    let h_col = E * n_f + n_d;
+    // The LogUp interaction (cumulative-sum) column is read at TWO OODS points
+    // (offsets [-1, 0]), so its hiding budget needs n_F = 2 — and the SAME mask
+    // config is applied to it below. Size every masked column for that larger
+    // budget (e·2 + n_d); over-provisioning the base columns (read at offset 0 only)
+    // is harmless. Matches the PLONK masked harness.
+    let h_col = E * 2 + n_d;
 
     // Masked geometry: smallest log size above `n` holding the trace plus the
     // randomizer coefficient space.
@@ -589,8 +605,8 @@ mod zk_tests {
     }
 
     /// Negative control: an unreconciled batch (the principal ledger under-reports
-    /// one fill) has a nonzero `claimed_sum`, so the conservation gate rejects it —
-    /// a malicious operator cannot settle a batch whose ledgers do not balance.
+    /// one fill) has a nonzero `claimed_sum`, so the balanced gate rejects it — the
+    /// prover cannot make two ledgers that are not the same multiset pass the gate.
     #[test]
     fn test_rfq_unreconciled_batch_rejected() {
         use stwo::core::channel::Blake2sChannel;
