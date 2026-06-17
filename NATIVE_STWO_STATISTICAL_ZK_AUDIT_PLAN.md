@@ -283,6 +283,28 @@ obligation.
   figure as **fabricated** (absent from the repo) — recorded here as a reminder that committee numbers
   require code-grounding. Per-chunk sufficiency remains open GAP B (O-B3), by design.
 
+- **Round 3** (surface = the soundness CORE, not the latest diff). 5 dimensions — split/recombine
+  (A_snd-3,4,5), lifted-frame masking (A_snd-6,7,9), salt/Merkle/tree (A_snd-1,2,8), FS absorption order
+  (A_fs-2), and k-derivation/extraction. 18 claims; **zero soundness, zero hiding, zero scope breaks** in
+  the committed code. Triage of the raw "6 confirmed": (a) **five** of them were the SAME uncommitted
+  `eprintln!("PROBE prove_zk: …")` an adversary wrote into the working tree as a perturbation probe — not in
+  `HEAD`, a workflow self-artifact, discarded (the committed prover is clean); (b) the lone "high" empty-tree
+  height-0 early-return (`vcs_lifted/verifier.rs:118-120`) was a **false positive** — the skeptic confirmed
+  it with "no forge built", but the tree's emptiness is AIR-derived (`column_log_sizes` from the AIR, never
+  the proof), so a populated tree cannot be declared empty and an empty tree allocates no queried values and
+  contributes nothing to FRI; verdict rejected on manual code review; (c) the **one genuine** finding was a
+  test-coverage gap: no negative test asserted `verify_zk` REJECTS a tampered masked-trace opening — fixed
+  by `test_plonk_zk_trace_masked_tampered_opening_rejected` (`147b4fb`), which demonstrates the reduced-degree
+  DEEP-ALI check has teeth on the masked geometry (it does not bound an adversarial masked column — the open
+  GAP-A rank theorem). Refuted highlights, each code-grounded: recombine exponents `repeated_double(mlb-1+i)`
+  correct for k=0..3 with the lifted-frame fold cancelling the off-by-k; prover-k == verifier-k (identical
+  pure trait composition, both AIR-derived); transparent `extract_composition_oods_eval` byte-identical at
+  k=1; FS transcript in lockstep with `t` and `claimed_sum` bound before ζ; salt is Merkle-bound only and
+  dropped by every extractor. **Process note:** round 3 hit the account session limit mid-run and was
+  completed by resuming the workflow (cached agents replay, only failed agents re-run); two adversaries also
+  mutated the working tree (the PROBE + a split-recombine repro test) — a reminder that committee runs can
+  leave self-inflicted scratch that must be triaged out, not committed.
+
 ---
 
 ## 6. Milestones & gates
