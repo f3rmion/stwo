@@ -323,21 +323,36 @@ where
     B: PolyOps,
     R: RngCore + CryptoRng + ?Sized,
 {
-    config.validate()?;
+    Ok(mask_columns(core::slice::from_ref(witness), config, rng)?
+        .pop()
+        .expect("one input column yields one masked column"))
+}
 
-    if witness.log_size() > config.trace_log_size {
-        return Err(WitnessMaskError::WitnessDegreeExceedsTraceDomain {
-            witness_log_size: witness.log_size(),
-            trace_log_size: config.trace_log_size,
-        });
-    }
+/// Batched [`mask_column`]: masks every column in `witnesses` with an INDEPENDENT
+/// randomizer, hoisting the column-independent precompute — the masked-domain
+/// twiddles and the `v_H` evaluation over that domain — out of the per-column
+/// loop. Equivalent to mapping [`mask_column`] over the slice, but computes that
+/// shared data ONCE instead of once per column (it is the dominant per-column cost
+/// when a trace has many columns).
+pub fn mask_columns<B, R>(
+    witnesses: &[CircleCoefficients<B>],
+    config: WitnessMaskConfig,
+    rng: &mut R,
+) -> Result<Vec<CircleCoefficients<B>>, WitnessMaskError>
+where
+    B: PolyOps,
+    R: RngCore + CryptoRng + ?Sized,
+{
+    config.validate()?;
 
     let trace_domain = config.trace_domain()?;
     let masked_domain = config.masked_domain()?;
+    // Column-independent: the masked-domain twiddle tree, computed ONCE.
     let twiddles = B::precompute_twiddles(masked_domain.half_coset);
 
-    // v_H evaluated over the masked domain, in natural order; reject if the
-    // masked domain meets H (any zero), which would defeat the masking.
+    // v_H evaluated over the masked domain, in natural order; reject if the masked
+    // domain meets H (any zero), which would defeat the masking. Column-independent,
+    // so also computed once. Aligned to the bit-reversed evaluation order below.
     let vanishing_natural: Col<B, BaseField> = masked_domain
         .iter()
         .map(|point| full_trace_domain_vanishing(trace_domain, point))
@@ -345,37 +360,49 @@ where
     if (0..vanishing_natural.len()).any(|i| vanishing_natural.at(i).is_zero()) {
         return Err(WitnessMaskError::MaskedDomainIntersectsTraceDomain);
     }
-    // Align v_H values with the bit-reversed evaluation order used below.
     let vanishing_values = CircleEvaluation::<B, BaseField>::new(masked_domain, vanishing_natural)
         .bit_reverse()
         .values;
 
-    // r: a random polynomial with `randomizer_dimension` nonzero coefficients,
-    // padded to the next power-of-two coefficient space.
-    let randomizer = sample_randomizer::<B, R>(
-        config.randomizer_coeff_count()?,
-        config.randomizer_dimension,
-        rng,
-    );
-    let randomizer_values = randomizer
-        .evaluate_with_twiddles(masked_domain, &twiddles)
-        .values;
+    witnesses
+        .iter()
+        .map(|witness| {
+            if witness.log_size() > config.trace_log_size {
+                return Err(WitnessMaskError::WitnessDegreeExceedsTraceDomain {
+                    witness_log_size: witness.log_size(),
+                    trace_log_size: config.trace_log_size,
+                });
+            }
 
-    // delta = v_H · r, formed pointwise on the masked domain then interpolated.
-    let delta_values: Col<B, BaseField> = (0..masked_domain.size())
-        .map(|i| vanishing_values.at(i) * randomizer_values.at(i))
-        .collect();
-    let delta =
-        CircleEvaluation::<B, BaseField, BitReversedOrder>::new(masked_domain, delta_values)
+            // r: a random polynomial with `randomizer_dimension` nonzero
+            // coefficients — INDEPENDENT for each column.
+            let randomizer = sample_randomizer::<B, R>(
+                config.randomizer_coeff_count()?,
+                config.randomizer_dimension,
+                rng,
+            );
+            let randomizer_values = randomizer
+                .evaluate_with_twiddles(masked_domain, &twiddles)
+                .values;
+
+            // delta = v_H · r, formed pointwise on the masked domain then interpolated.
+            let delta_values: Col<B, BaseField> = (0..masked_domain.size())
+                .map(|i| vanishing_values.at(i) * randomizer_values.at(i))
+                .collect();
+            let delta = CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
+                masked_domain,
+                delta_values,
+            )
             .interpolate_with_twiddles(&twiddles);
 
-    // ŵ = w + delta, in the enlarged FFT space.
-    let extended_witness = witness.extend(masked_domain.log_size());
-    let coeffs: Col<B, BaseField> = (0..extended_witness.coeffs.len())
-        .map(|i| extended_witness.coeffs.at(i) + delta.coeffs.at(i))
-        .collect();
-
-    Ok(CircleCoefficients::new(coeffs))
+            // ŵ = w + delta, in the enlarged FFT space.
+            let extended_witness = witness.extend(masked_domain.log_size());
+            let coeffs: Col<B, BaseField> = (0..extended_witness.coeffs.len())
+                .map(|i| extended_witness.coeffs.at(i) + delta.coeffs.at(i))
+                .collect();
+            Ok(CircleCoefficients::new(coeffs))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

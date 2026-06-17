@@ -448,7 +448,9 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
     use rand::SeedableRng;
     use stwo::core::fri::FriConfig;
     use stwo::prover::prove_zk;
-    use stwo::prover::statistical_zk::{mask_column, sample_salt_column, WitnessMaskConfig};
+    use stwo::prover::statistical_zk::{
+        mask_column, mask_columns, sample_salt_column, WitnessMaskConfig,
+    };
 
     // [F : F_q] for QM31 over M31.
     const E: usize = 4;
@@ -529,11 +531,12 @@ pub fn prove_fibonacci_plonk_zk_trace_masked(
     let constants_trace_location = tree_builder.extend_polys(constant_polys);
     tree_builder.commit(channel);
 
-    // Base trace: masked.
-    let base_polys = gen_trace(n, &circuit)
+    // Base trace: masked (batched so the masked-domain twiddles + v_H are computed once).
+    let base_coeffs = gen_trace(n, &circuit)
         .into_iter()
-        .map(|eval| mask_column(&eval.interpolate_with_twiddles(&twiddles), mask_config, &mut rng).unwrap())
+        .map(|eval| eval.interpolate_with_twiddles(&twiddles))
         .collect_vec();
+    let base_polys = mask_columns(&base_coeffs, mask_config, &mut rng).unwrap();
     let mut tree_builder = commitment_scheme.tree_builder();
     // Capture the trace location from the real columns only, then append the
     // leaf-size Layer-0 salt column AFTER (so the AIR never reads it).

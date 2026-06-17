@@ -286,7 +286,7 @@ mod tests {
         use rand::SeedableRng;
         use stwo::prover::poly::circle::PolyOps;
         use stwo::prover::prove_zk;
-        use stwo::prover::statistical_zk::{mask_column, sample_salt_column, WitnessMaskConfig};
+        use stwo::prover::statistical_zk::{mask_columns, sample_salt_column, WitnessMaskConfig};
 
         // [F : F_q] for QM31 over M31; an OODS opening of a secure value charges e.
         const E: usize = 4;
@@ -347,13 +347,11 @@ mod tests {
 
         // Base trace: masked column by column with independent randomizers, plus a
         // leaf-size Layer-0 salt column so the base-trace tree's leaf hashes hide.
-        let mut masked_trace = generate_trace::<FIB_SEQUENCE_LENGTH, SimdBackend>(&inputs)
+        let trace_coeffs = generate_trace::<FIB_SEQUENCE_LENGTH, SimdBackend>(&inputs)
             .into_iter()
-            .map(|eval| {
-                let coeffs = eval.interpolate_with_twiddles(&twiddles);
-                mask_column(&coeffs, mask_config, &mut rng).unwrap()
-            })
+            .map(|eval| eval.interpolate_with_twiddles(&twiddles))
             .collect_vec();
+        let mut masked_trace = mask_columns(&trace_coeffs, mask_config, &mut rng).unwrap();
         masked_trace.push(sample_salt_column::<SimdBackend, _>(comp_log, &mut rng));
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_polys(masked_trace);
