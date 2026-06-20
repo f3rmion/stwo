@@ -30,6 +30,20 @@ pub trait Component {
     /// `n_interaction_phases`.
     fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>>;
 
+    /// The maximum log size among the component's CONSTRAINT trace columns — the columns the
+    /// constraints actually read — used to infer the constraint-evaluation domain. Defaults to the
+    /// maximum of [`Self::trace_log_degree_bounds`]. A component that commits auxiliary columns the
+    /// constraints never read (e.g. statistical-ZK hiding-Merkle salt columns) overrides this to
+    /// exclude them, so they do not perturb evaluation-mode inference.
+    fn constraint_trace_log_size(&self) -> u32 {
+        self.trace_log_degree_bounds()
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Returns the mask points for each trace column. The returned TreeVec should be of size
     /// `n_interaction_phases`.
     /// The parameter `max_log_degree_bound` is the maximum log degree of a committed polynomial
@@ -52,4 +66,15 @@ pub trait Component {
         evaluation_accumulator: &mut PointEvaluationAccumulator,
         max_log_degree_bound: u32,
     );
+
+    /// The component's public LogUp boundary sum (`claimed_sum`). It is a public
+    /// input the verifier must bind into the Fiat–Shamir transcript before drawing
+    /// challenges and check against the application's expected total; an unbound,
+    /// prover-chosen `claimed_sum` lets a malicious prover prove a false lookup total
+    /// (statistical-ZK soundness finding A_fs-1). Defaults to `0` for components with
+    /// no lookup argument.
+    fn claimed_sum(&self) -> SecureField {
+        use num_traits::Zero;
+        SecureField::zero()
+    }
 }

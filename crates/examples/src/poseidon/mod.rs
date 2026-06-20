@@ -486,7 +486,6 @@ mod tests {
         );
     }
 
-    #[ignore = "AIRs with constraint degree >= 2 are not supported yet in the lifted protocol."]
     #[test_log::test]
     fn test_simd_poseidon_prove() {
         // Note: To see time measurement, run test with
@@ -529,6 +528,103 @@ mod tests {
         commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
 
         verify(&[&component], channel, commitment_scheme, proof).unwrap();
+    }
+
+    /// Statistical-ZK composition randomizer through a constraint-degree-2 AIR
+    /// (LOG_EXPAND = 2 ⇒ split factor k = 2, four composition chunks). Exercises the
+    /// `2^k`-way split + lifted-frame recombination + `t` opened at `repeated_double(k)`
+    /// end to end: prove_zk's DEEP-ALI sanity check and verify_zk both accept. This is
+    /// composition-only ZK (no Layer-1 trace masking), so it validates the split
+    /// generalization for degree-2 AIRs, not trace hiding.
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_simd_poseidon_prove_zk() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use stwo::core::verifier::verify_zk;
+        use stwo::prover::backend::simd::SimdBackend;
+        use stwo::prover::poly::circle::PolyOps;
+        use stwo::prover::{prove_zk, CommitmentSchemeProver};
+        use stwo_constraint_framework::TraceLocationAllocator;
+
+        use crate::poseidon::{
+            gen_interaction_trace, gen_trace, PoseidonComponent, PoseidonEval, LOG_EXPAND,
+            N_LOG_INSTANCES_PER_ROW,
+        };
+
+        let log_n_instances = 8u32;
+        let log_n_rows = log_n_instances - N_LOG_INSTANCES_PER_ROW as u32;
+        let log_blowup = 1;
+        // composition_log_degree_bound = log_n_rows + LOG_EXPAND; force the lifting to
+        // accommodate the unsplit `t` tree at composition_log + log_blowup.
+        let composition_log = log_n_rows + LOG_EXPAND;
+        let config = PcsConfig {
+            pow_bits: 10,
+            fri_config: FriConfig::new(5, log_blowup, 64, 1),
+            lifting_log_size: Some(composition_log + log_blowup),
+        };
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(composition_log + log_blowup)
+                .circle_domain()
+                .half_coset,
+        );
+
+        let channel = &mut Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        // Preprocessed (empty), trace, interaction — as in prove_poseidon.
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![]);
+        tree_builder.commit(channel);
+
+        let (trace, lookup_data) = gen_trace(log_n_rows);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(trace);
+        tree_builder.commit(channel);
+
+        let lookup_elements = PoseidonElements::draw(channel);
+        let (interaction_trace, claimed_sum) =
+            gen_interaction_trace(log_n_rows, lookup_data, &lookup_elements);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction_trace);
+        tree_builder.commit(channel);
+
+        let component = PoseidonComponent::new(
+            &mut TraceLocationAllocator::default(),
+            PoseidonEval {
+                log_n_rows,
+                lookup_elements,
+                claimed_sum,
+            },
+            claimed_sum,
+        );
+
+        let mut rng = StdRng::seed_from_u64(7);
+        // > n_F^comp + n_D = 65 (reconstruction-resistance) and within the composition
+        // coefficient space 2^composition_log.
+        let randomizer_dimension = 1 << composition_log;
+        let extended_proof = prove_zk::<SimdBackend, Blake2sMerkleChannel>(
+            &[&component],
+            channel,
+            commitment_scheme,
+            &mut rng,
+            randomizer_dimension,
+        )
+        .unwrap();
+
+        // Verify.
+        let channel = &mut Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(extended_proof.proof.commitments[0], &sizes[0], channel);
+        commitment_scheme.commit(extended_proof.proof.commitments[1], &sizes[1], channel);
+        let lookup_elements = PoseidonElements::draw(channel);
+        assert_eq!(lookup_elements, component.lookup_elements);
+        commitment_scheme.commit(extended_proof.proof.commitments[2], &sizes[2], channel);
+        verify_zk(&[&component], channel, commitment_scheme, extended_proof.proof, false).unwrap();
     }
 
     #[ignore = "AIRs with constraint degree >= 2 are not supported yet in the lifted protocol."]

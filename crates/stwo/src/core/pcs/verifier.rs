@@ -79,24 +79,21 @@ impl<MC: MerkleChannel> CommitmentSchemeVerifier<MC> {
         channel.mix_u64(proof.proof_of_work);
         // Get FRI query positions.
         let query_positions = fri_verifier.sample_query_positions(channel);
-        let preprocessed_query_positions = prepare_preprocessed_query_positions(
-            &query_positions,
-            lifting_log_size,
-            self.trees[0].height,
-        );
 
-        // Build the query positions tree: the preprocessed tree needs a different treatment than
-        // the other trees.
+        // Each tree commits at its own (possibly shorter) height; remap the FRI
+        // query positions down to that tree's domain. A tree at the full lifting
+        // height gets the positions back unchanged, so this is identical to the
+        // previous "preprocessed-tree-only" handling when every tree shares a
+        // height — and additionally supports shorter non-preprocessed trees.
         let query_positions_tree = TreeVec::new(
             self.trees
                 .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    if i == 0 {
-                        preprocessed_query_positions.as_slice()
-                    } else {
-                        query_positions.as_slice()
-                    }
+                .map(|tree| {
+                    prepare_preprocessed_query_positions(
+                        &query_positions,
+                        lifting_log_size,
+                        tree.height,
+                    )
                 })
                 .collect::<Vec<_>>(),
         );
@@ -108,7 +105,7 @@ impl<MC: MerkleChannel> CommitmentSchemeVerifier<MC> {
             .zip_eq(query_positions_tree)
             .map(
                 |(((tree, decommitment), queried_values), query_positions)| {
-                    tree.verify(query_positions, queried_values, decommitment)
+                    tree.verify(&query_positions, queried_values, decommitment)
                 },
             )
             .0

@@ -179,6 +179,402 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_with_pp_prove_zk_with_blake() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use stwo::core::verifier::verify_zk;
+        use stwo::prover::prove_zk;
+
+        for log_n_instances in 4..=8 {
+            // The unsplit composition randomizer lives one log size above the split
+            // composition chunks at log_n + 1 + log_blowup, making it the tallest
+            // committed tree. Pin every tree to that lifting size so all committed
+            // trees share a height and FRI queries decommit uniformly. A non-empty
+            // preprocessed tree is required so its height tracks the lifting size.
+            let mut config = PcsConfig::default();
+            config.lifting_log_size =
+                Some(log_n_instances + 1 + config.fri_config.log_blowup_factor);
+            // Precompute twiddles covering the lifted domain.
+            let twiddles = SimdBackend::precompute_twiddles(
+                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                    .circle_domain()
+                    .half_coset,
+            );
+
+            // Setup protocol.
+            let prover_channel = &mut Blake2sM31Channel::default();
+            let mut commitment_scheme = CommitmentSchemeProver::<
+                SimdBackend,
+                Blake2sM31MerkleChannel,
+            >::new(config, &twiddles);
+
+            // Preprocessed trace.
+            let mut tree_builder = commitment_scheme.tree_builder();
+            let preprocessed_trace = generate_preprocessed_trace(log_n_instances);
+            tree_builder.extend_evals(vec![preprocessed_trace]);
+            tree_builder.commit(prover_channel);
+
+            // Trace.
+            let trace =
+                generate_trace::<FIB_SEQUENCE_LENGTH, _>(&generate_test_inputs(log_n_instances));
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(trace);
+            tree_builder.commit(prover_channel);
+
+            // Prove constraints with the composition randomizer active.
+            let component = WideFibWithPpComponent::new(
+                &mut TraceLocationAllocator::default(),
+                WideFibWithPpEval::<FIB_SEQUENCE_LENGTH> {
+                    log_n_rows: log_n_instances,
+                },
+                SecureField::zero(),
+            );
+
+            let mut rng = StdRng::seed_from_u64(0);
+            // The randomizer carries this many independent base-field coefficients
+            // per coordinate. It must fit the composition coefficient space
+            // (2^(log_n+1)); half that space is a nontrivial, always-valid choice.
+            let randomizer_dimension = 1 << log_n_instances;
+            let extended_proof = prove_zk::<SimdBackend, Blake2sM31MerkleChannel>(
+                &[&component],
+                prover_channel,
+                commitment_scheme,
+                &mut rng,
+                randomizer_dimension,
+            )
+            .unwrap();
+            let proof = extended_proof.proof;
+
+            // Verify.
+            let verifier_channel = &mut Blake2sM31Channel::default();
+            let commitment_scheme =
+                &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+
+            // Retrieve the expected column sizes in each commitment interaction, from the AIR.
+            let sizes = component.trace_log_degree_bounds();
+            commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+            commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+            verify_zk(&[&component], verifier_channel, commitment_scheme, proof, false).unwrap();
+        }
+    }
+
+    /// Proves the WideFib-with-preprocessed AIR through the statistical-ZK path
+    /// with Layer-1 base-trace masking active: each base-trace column is committed
+    /// as `ŵ = w + v_H·r` (witness-hiding off `H`), the public preprocessed column
+    /// is lifted (not masked) to the enlarged geometry, and the composition
+    /// randomizer `t` masks the composition on top. `witness_seed` selects the
+    /// witness inputs and `randomizer_seed` seeds the CSPRNG for the trace mask and
+    /// composition randomizer, so the two can be varied independently.
+    ///
+    /// CANDIDATE: this wires the masking MECHANISM (prove_zk accepts the masked
+    /// trace); it does NOT certify the absence of leakage.
+    #[cfg(feature = "statistical-zk")]
+    fn prove_wide_fib_pp_trace_masked(
+        n: u32,
+        witness_seed: u64,
+        randomizer_seed: u64,
+    ) -> (
+        WideFibWithPpComponent<FIB_SEQUENCE_LENGTH>,
+        PcsConfig,
+        stwo::core::proof::ExtendedStarkProof<
+            stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleHasher,
+        >,
+    ) {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use stwo::prover::poly::circle::PolyOps;
+        use stwo::prover::prove_zk;
+        use stwo::prover::statistical_zk::{mask_columns, sample_salt_column, WitnessMaskConfig};
+
+        // [F : F_q] for QM31 over M31; an OODS opening of a secure value charges e.
+        const E: usize = 4;
+
+        let base = PcsConfig::default();
+        let b = base.fri_config.log_blowup_factor;
+        // Base columns are read at offset 0 only (n_F = 1); n_D = FRI queries.
+        let n_f = 1usize;
+        let n_d = base.fri_config.n_queries;
+        let h_col = E * n_f + n_d;
+
+        // Masked geometry: smallest log size above `n` that holds the trace plus
+        // the randomizer coefficient space.
+        let masked_log_size = {
+            let need = (1usize << n) + h_col.next_power_of_two();
+            let mut l = n + 1;
+            while (1usize << l) < need {
+                l += 1;
+            }
+            l
+        };
+        // The masked composition lives one log size above the masked trace; the
+        // unsplit `t` tree is one above the split chunks, so force the lifting to
+        // `(masked_log_size + 1) + log_blowup`.
+        let comp_log = masked_log_size + 1;
+        let mut config = base;
+        config.lifting_log_size = Some(comp_log + b);
+
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(comp_log + b).circle_domain().half_coset,
+        );
+
+        let prover_channel = &mut Blake2sM31Channel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let mask_config = WitnessMaskConfig::new(n, masked_log_size, h_col).unwrap();
+        mask_config.check_leakage_budget(h_col).unwrap();
+        let mut rng = StdRng::seed_from_u64(randomizer_seed);
+
+        // Preprocessed trace: public, so it is only LIFTED to the masked geometry
+        // (low-degree extension), never masked.
+        let mut tree_builder = commitment_scheme.tree_builder();
+        let pp_lifted = generate_preprocessed_trace::<SimdBackend>(n)
+            .interpolate_with_twiddles(&twiddles)
+            .extend(masked_log_size);
+        tree_builder.extend_polys(vec![pp_lifted]);
+        tree_builder.commit(prover_channel);
+
+        // Witness inputs vary with `witness_seed` so distinct witnesses can be proved.
+        let inputs = (0..1 << n)
+            .map(|i| FibInput {
+                a: BaseField::one(),
+                b: BaseField::from_u32_unchecked((i as u32).wrapping_add(witness_seed as u32)),
+            })
+            .collect_vec();
+
+        // Base trace: masked column by column with independent randomizers, plus a
+        // leaf-size Layer-0 salt column so the base-trace tree's leaf hashes hide.
+        let trace_coeffs = generate_trace::<FIB_SEQUENCE_LENGTH, SimdBackend>(&inputs)
+            .into_iter()
+            .map(|eval| eval.interpolate_with_twiddles(&twiddles))
+            .collect_vec();
+        let mut masked_trace = mask_columns(&trace_coeffs, mask_config, &mut rng).unwrap();
+        masked_trace.push(sample_salt_column::<SimdBackend, _>(comp_log, &mut rng));
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_polys(masked_trace);
+        tree_builder.commit(prover_channel);
+
+        // `eval.log_size()` stays `n` (the constraint vanishing domain); the
+        // component declares the enlarged committed trace geometry and the one
+        // Layer-0 salt column on the base-trace tree (tree 1; preprocessed tree 0
+        // is public, no salt).
+        let component = WideFibWithPpComponent::<FIB_SEQUENCE_LENGTH>::new(
+            &mut TraceLocationAllocator::default(),
+            WideFibWithPpEval::<FIB_SEQUENCE_LENGTH> { log_n_rows: n },
+            SecureField::zero(),
+        )
+        .with_masked_trace_log_size(masked_log_size)
+        .with_salt_columns_per_tree(vec![0, 1]);
+
+        // `t` carries this many coefficients per coordinate; must fit the masked
+        // composition coefficient space (2^comp_log).
+        let randomizer_dimension = 1 << masked_log_size;
+        let extended_proof = prove_zk::<SimdBackend, Blake2sM31MerkleChannel>(
+            &[&component],
+            prover_channel,
+            commitment_scheme,
+            &mut rng,
+            randomizer_dimension,
+        )
+        .unwrap();
+
+        (component, config, extended_proof)
+    }
+
+    #[cfg(feature = "statistical-zk")]
+    fn verify_wide_fib_pp_trace_masked(
+        component: &WideFibWithPpComponent<FIB_SEQUENCE_LENGTH>,
+        config: PcsConfig,
+        proof: stwo::core::proof::StarkProof<
+            stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleHasher,
+        >,
+    ) {
+        use stwo::core::verifier::verify_zk;
+
+        let verifier_channel = &mut Blake2sM31Channel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sM31MerkleChannel>::new(config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+        verify_zk(&[component], verifier_channel, commitment_scheme, proof, false).unwrap();
+    }
+
+    /// Layer-1 trace masking end to end: prove_zk/verify_zk accept the masked
+    /// trace across a range of sizes.
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_with_pp_prove_zk_trace_masked_with_blake() {
+        for log_n_instances in 4..=8 {
+            let (component, config, extended_proof) =
+                prove_wide_fib_pp_trace_masked(log_n_instances, 0, 0);
+            verify_wide_fib_pp_trace_masked(&component, config, extended_proof.proof);
+        }
+    }
+
+    /// Mask-isolating randomization check (mechanism evidence, NOT a no-leak
+    /// certificate): proves the SAME witness twice, varying only the randomizer
+    /// seed, and asserts the BASE-TRACE OODS openings (sampled-values tree index 1,
+    /// not the composition randomizer `t`) differ. With the witness fixed, the
+    /// openings can only differ because the trace mask `v_H·r` is actually applied —
+    /// if masking were a no-op the two runs would commit the identical trace, draw
+    /// the identical OODS point, and produce identical openings. This isolates the
+    /// MASK's contribution (unlike varying the witness, which differs regardless).
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_with_pp_trace_masking_randomizes_openings() {
+        let n = 6;
+        let witness_seed = 7;
+        let (component_a, config_a, proof_a) =
+            prove_wide_fib_pp_trace_masked(n, witness_seed, 1);
+        let (component_b, config_b, proof_b) =
+            prove_wide_fib_pp_trace_masked(n, witness_seed, 99999);
+
+        // Tree 0 = preprocessed, tree 1 = base trace. Same witness, different
+        // randomizer ⇒ masked base-trace OODS openings must differ.
+        let base_trace_a = &proof_a.proof.sampled_values[1];
+        let base_trace_b = &proof_b.proof.sampled_values[1];
+        assert_ne!(
+            base_trace_a, base_trace_b,
+            "same witness, different randomizer: masked base-trace OODS openings \
+             must differ (else the trace mask is a no-op)"
+        );
+
+        verify_wide_fib_pp_trace_masked(&component_a, config_a, proof_a.proof);
+        verify_wide_fib_pp_trace_masked(&component_b, config_b, proof_b.proof);
+    }
+
+    /// Two distinct witnesses for the same AIR both prove and verify through the
+    /// masked path (the acceptance criterion's two-witness robustness check). This
+    /// does NOT isolate the mask — distinct witnesses produce distinct openings
+    /// even without masking; mask randomization is covered by the test above and by
+    /// the `mask_column` unit tests.
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_with_pp_distinct_witnesses_both_verify() {
+        let n = 6;
+        let (component_a, config_a, proof_a) = prove_wide_fib_pp_trace_masked(n, 1, 1);
+        let (component_b, config_b, proof_b) = prove_wide_fib_pp_trace_masked(n, 2, 1);
+        verify_wide_fib_pp_trace_masked(&component_a, config_a, proof_a.proof);
+        verify_wide_fib_pp_trace_masked(&component_b, config_b, proof_b.proof);
+    }
+
+    /// Acceptance gate — multi-witness same-statement indistinguishability
+    /// (MECHANISM evidence, NOT a no-leak certificate). Many DISTINCT witnesses
+    /// share one public statement: the preprocessed `seq` column and the AIR are
+    /// fixed, and `claimed_sum = 0` (no LogUp). For every witness, each with a
+    /// fresh randomizer:
+    ///  - the public-statement commitment (tree 0, preprocessed) is byte-identical
+    ///    across all witnesses — the statement does not separate them;
+    ///  - the proof verifies;
+    ///  - the masked trace openings (tree 1) carry the witness behind the mask, so
+    ///    no two collide.
+    /// True statistical indistinguishability is the cryptographer's bound (GAP A);
+    /// the distributional full-rank evidence is the rank check. This gate confirms
+    /// the public surface is constant across witnesses and the mechanism holds.
+    #[cfg(feature = "statistical-zk")]
+    #[test]
+    fn test_wide_fib_multi_witness_same_statement_indistinguishable() {
+        let n = 6;
+        let mut statement_commitment = None;
+        let mut trace_openings = Vec::new();
+        for w in 0..8u64 {
+            let (component, config, proof) = prove_wide_fib_pp_trace_masked(n, 100 + w, 7 + w);
+            // The preprocessed (public-statement) commitment must be the same for
+            // every witness: it is committed before any witness data enters the
+            // channel and depends only on the fixed `seq` column.
+            match &statement_commitment {
+                None => statement_commitment = Some(proof.proof.commitments[0]),
+                Some(c) => assert_eq!(
+                    *c, proof.proof.commitments[0],
+                    "public-statement commitment must be identical across witnesses"
+                ),
+            }
+            trace_openings.push(proof.proof.sampled_values[1].clone());
+            verify_wide_fib_pp_trace_masked(&component, config, proof.proof);
+        }
+        // Distinct witnesses behind the mask ⇒ no two masked trace openings collide.
+        for i in 0..trace_openings.len() {
+            for j in (i + 1)..trace_openings.len() {
+                assert_ne!(
+                    trace_openings[i], trace_openings[j],
+                    "masked trace openings must not collide across witnesses"
+                );
+            }
+        }
+    }
+
+    /// Acceptance gate — prover overhead benchmark (`--ignored` to run; timing is
+    /// non-deterministic so it is not a CI assertion). Times the transparent prover
+    /// and the statistical-ZK trace-masked prover for the same WideFib statement and
+    /// prints the overhead. NOTE the masked harness over-provisions the composition
+    /// randomizer (`randomizer_dimension = 1 << masked_log_size`, the full space) for
+    /// test robustness, and masks every trace column up to the enlarged geometry, so
+    /// this is an UPPER BOUND on production overhead (which would size to the budget
+    /// `h_t ≈ n_F + n_D + 1` and to `h_col` rather than the full space).
+    #[cfg(feature = "statistical-zk")]
+    #[ignore]
+    #[test]
+    fn bench_wide_fib_zk_overhead() {
+        use std::time::Instant;
+
+        for n in [6u32, 8, 10] {
+            // Transparent baseline: standard prove of the same AIR.
+            let t0 = Instant::now();
+            {
+                let config = PcsConfig::default();
+                let twiddles = SimdBackend::precompute_twiddles(
+                    CanonicCoset::new(n + 1 + config.fri_config.log_blowup_factor)
+                        .circle_domain()
+                        .half_coset,
+                );
+                let channel = &mut Blake2sM31Channel::default();
+                let mut commitment_scheme =
+                    CommitmentSchemeProver::<SimdBackend, Blake2sM31MerkleChannel>::new(
+                        config, &twiddles,
+                    );
+                let mut tree_builder = commitment_scheme.tree_builder();
+                tree_builder.extend_evals(vec![generate_preprocessed_trace(n)]);
+                tree_builder.commit(channel);
+                let inputs = (0..1 << n)
+                    .map(|i| FibInput {
+                        a: BaseField::one(),
+                        b: BaseField::from_u32_unchecked(i as u32),
+                    })
+                    .collect_vec();
+                let mut tree_builder = commitment_scheme.tree_builder();
+                tree_builder.extend_evals(generate_trace::<FIB_SEQUENCE_LENGTH, _>(&inputs));
+                tree_builder.commit(channel);
+                let component = WideFibWithPpComponent::new(
+                    &mut TraceLocationAllocator::default(),
+                    WideFibWithPpEval::<FIB_SEQUENCE_LENGTH> { log_n_rows: n },
+                    SecureField::zero(),
+                );
+                let _ = prove::<SimdBackend, Blake2sM31MerkleChannel>(
+                    &[&component],
+                    channel,
+                    commitment_scheme,
+                )
+                .unwrap();
+            }
+            let transparent = t0.elapsed();
+
+            // Statistical-ZK trace-masked prover.
+            let t1 = Instant::now();
+            let _ = prove_wide_fib_pp_trace_masked(n, 1, 1);
+            let zk = t1.elapsed();
+
+            let overhead = zk.as_secs_f64() / transparent.as_secs_f64() - 1.0;
+            println!(
+                "n={n}: transparent={transparent:?} zk={zk:?} overhead={:+.1}% (upper bound)",
+                overhead * 100.0
+            );
+        }
+    }
+
     #[test_log::test]
     fn test_wide_fib_with_unused_pp_prove_with_blake() {
         for log_n_instances in 4..=8 {

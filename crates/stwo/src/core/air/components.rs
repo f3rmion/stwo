@@ -24,6 +24,43 @@ impl Components<'_> {
             .unwrap()
     }
 
+    /// Max declared trace column degree bound over the NON-preprocessed trees (the
+    /// constraint / trace domain). Used to derive the composition split factor
+    /// `k = composition_log_degree_bound - base`. Unlike [`Self::column_log_sizes`]
+    /// it ignores the preprocessed tree, so it tolerates unused preprocessed columns
+    /// (whose sizes are never set). Derived from the AIR, so prover and verifier
+    /// agree independently of lifting / blow-up.
+    pub fn base_trace_log_degree_bound(&self) -> u32 {
+        self.components
+            .iter()
+            .map(|component| {
+                let bounds = component.trace_log_degree_bounds();
+                bounds
+                    .iter()
+                    .skip(1)
+                    .flat_map(|cols| cols.iter().copied())
+                    .max()
+                    .unwrap()
+            })
+            .max()
+            .unwrap()
+    }
+
+    /// Like [`Self::base_trace_log_degree_bound`] but SALT-AWARE: the statistical-ZK
+    /// composition split factor. The masked trace columns are committed at an
+    /// enlarged geometry and the trees carry leaf-size hiding-Merkle salt columns at
+    /// the composition bound, so the declared trace degree bounds are inflated; the
+    /// split must instead land the chunks at the CONSTRAINT trace domain
+    /// ([`Component::constraint_trace_log_size`], which excludes the salt).
+    #[cfg(feature = "statistical-zk")]
+    pub fn base_constraint_trace_log_degree_bound(&self) -> u32 {
+        self.components
+            .iter()
+            .map(|component| component.constraint_trace_log_size())
+            .max()
+            .unwrap()
+    }
+
     pub fn mask_points(
         &self,
         point: CirclePoint<SecureField>,

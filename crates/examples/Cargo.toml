@@ -9,6 +9,9 @@ description = "Example implementations using the STWO prover"
 parallel = ["dep:rayon", "stwo/parallel"]
 tracing = ["stwo/tracing"]
 slow-tests = []
+# Statistical zero-knowledge (witness-hiding) prover paths, forwarded to the
+# stwo crate. Non-default and experimental.
+statistical-zk = ["stwo/statistical-zk", "stwo-constraint-framework/statistical-zk"]
 
 [lib]
 bench = false

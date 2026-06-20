@@ -326,4 +326,37 @@ mod test {
             .for_each(|layer| expected.push(HashMap::from_iter([(0, layer[0]), (1, layer[1])])));
         assert_eq!(expected, aux.all_node_values);
     }
+
+    /// Isolates the Layer-0 hiding-Merkle salt mechanism: an extra (salt) column is
+    /// part of every leaf's hash preimage, so varying it changes the root, while the
+    /// real column's decommitted values are unchanged. Guards against a salt that
+    /// silently fails to enter the commitment.
+    #[test]
+    fn salt_column_changes_root_and_preserves_data() {
+        let log_size = 4;
+        let data: Vec<BaseField> = (0..1 << log_size).map(M31::from_u32_unchecked).collect();
+        let salt_a: Vec<BaseField> = (0..1 << log_size)
+            .map(|i| M31::from_u32_unchecked(i + 100))
+            .collect();
+        let salt_b: Vec<BaseField> = (0..1 << log_size)
+            .map(|i| M31::from_u32_unchecked(i + 999))
+            .collect();
+
+        let commit = |cols: Vec<&Vec<BaseField>>| {
+            MerkleProverLifted::<CpuBackend, Blake2sHasher>::commit(cols, log_size, 0)
+        };
+        let tree_a = commit(vec![&data, &salt_a]);
+        let tree_b = commit(vec![&data, &salt_b]);
+        let tree_no_salt = commit(vec![&data]);
+
+        // The salt enters the leaf preimage: different salt ⇒ different root, and a
+        // salted tree differs from the unsalted one.
+        assert_ne!(tree_a.root(), tree_b.root());
+        assert_ne!(tree_a.root(), tree_no_salt.root());
+
+        // The real (data) column decommits to the same values regardless of salt.
+        let data_a = tree_a.decommit(&[3], vec![&data, &salt_a]).0[0].clone();
+        let data_b = tree_b.decommit(&[3], vec![&data, &salt_b]).0[0].clone();
+        assert_eq!(data_a, data_b);
+    }
 }

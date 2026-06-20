@@ -22,6 +22,10 @@ std = [
     "stwo-std-shims/std",
 ]
 prover = ["std", "tracing/attributes"]
+# Statistical zero-knowledge (witness-hiding) prover paths. Non-default,
+# experimental, CANDIDATE-until-cryptographer-review. See
+# NATIVE_STWO_STATISTICAL_ZK_IMPLEMENTATION_PLAN.md.
+statistical-zk = ["prover"]
 parallel = ["rayon", "indexmap/rayon"]
 slow-tests = []
 tracing = []
