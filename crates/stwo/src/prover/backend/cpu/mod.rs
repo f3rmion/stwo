@@ -80,9 +80,9 @@ mod tests {
     use rand::rngs::SmallRng;
 
     use crate::core::fields::qm31::QM31;
-    use crate::core::fields::{batch_inverse_in_place, FieldExpOps};
-    use crate::prover::backend::cpu::bit_reverse;
+    use crate::core::fields::{FieldExpOps, batch_inverse_in_place};
     use crate::prover::backend::Column;
+    use crate::prover::backend::cpu::bit_reverse;
 
     #[test]
     fn bit_reverse_works() {
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn batch_inverse_in_place_test() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let column = rng.gen::<[QM31; 16]>().to_vec();
+        let column = rng.random::<[QM31; 16]>().to_vec();
         let expected = column.iter().map(|e| e.inverse()).collect_vec();
         let mut dst = Vec::zeros(column.len());
 

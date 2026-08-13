@@ -4,7 +4,7 @@ use core::ops::{
 };
 
 use bytemuck::{Pod, Zeroable};
-use rand::distributions::{Distribution, Standard};
+use rand::distr::{Distribution, StandardUniform};
 use serde::{Deserialize, Serialize};
 
 use super::{ComplexConjugate, FieldExpOps};
@@ -110,8 +110,8 @@ impl Mul for M31 {
 impl FieldExpOps for M31 {
     /// ```
     /// use num_traits::One;
-    /// use stwo::core::fields::m31::BaseField;
     /// use stwo::core::fields::FieldExpOps;
+    /// use stwo::core::fields::m31::BaseField;
     ///
     /// let v = BaseField::from(19);
     /// assert_eq!(v.inverse() * v, BaseField::one());
@@ -166,10 +166,10 @@ impl From<i32> for M31 {
     }
 }
 
-impl Distribution<M31> for Standard {
+impl Distribution<M31> for StandardUniform {
     // Not intended for cryptographic use. Should only be used in tests and benchmarks.
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> M31 {
-        M31(rng.gen_range(0..P))
+        M31(rng.random_range(0..P))
     }
 }
 
@@ -188,8 +188,8 @@ macro_rules! m31 {
 /// Multiplication tree found with [addchain](https://github.com/mmcloughlin/addchain).
 ///
 /// ```
-/// use stwo::core::fields::m31::{pow2147483645, BaseField};
 /// use stwo::core::fields::FieldExpOps;
+/// use stwo::core::fields::m31::{BaseField, pow2147483645};
 ///
 /// let v = BaseField::from(19);
 /// assert_eq!(pow2147483645(v), v.pow(2147483645));
@@ -228,19 +228,15 @@ mod tests {
     }
 
     const fn neg_p(a: u32) -> u32 {
-        if a == 0 {
-            0
-        } else {
-            P - a
-        }
+        if a == 0 { 0 } else { P - a }
     }
 
     #[test]
     fn test_basic_ops() {
         let mut rng = SmallRng::seed_from_u64(0);
         for _ in 0..10000 {
-            let x: u32 = rng.gen::<u32>() % P;
-            let y: u32 = rng.gen::<u32>() % P;
+            let x: u32 = rng.random::<u32>() % P;
+            let y: u32 = rng.random::<u32>() % P;
             assert_eq!(m31!(add_p(x, y)), m31!(x) + m31!(y));
             assert_eq!(m31!(mul_p(x, y)), m31!(x) * m31!(y));
             assert_eq!(m31!(neg_p(x)), -m31!(x));

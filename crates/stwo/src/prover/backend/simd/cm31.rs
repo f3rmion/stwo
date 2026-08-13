@@ -4,10 +4,10 @@ use std::ops::{Add, Mul, MulAssign, Neg, Sub};
 use bytemuck::{Pod, Zeroable};
 use num_traits::{One, Zero};
 
-use super::m31::{PackedM31, N_LANES};
 use super::PACKED_CM31_BATCH_INVERSE_CHUNK_SIZE;
+use super::m31::{N_LANES, PackedM31};
 use crate::core::fields::cm31::CM31;
-use crate::core::fields::{batch_inverse_chunked, FieldExpOps};
+use crate::core::fields::{FieldExpOps, batch_inverse_chunked};
 use crate::core::utils;
 
 /// SIMD implementation of [`CM31`].
@@ -192,8 +192,8 @@ mod tests {
     #[test]
     fn addition_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedCM31::from_array(lhs);
         let packed_rhs = PackedCM31::from_array(rhs);
 
@@ -205,8 +205,8 @@ mod tests {
     #[test]
     fn subtraction_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedCM31::from_array(lhs);
         let packed_rhs = PackedCM31::from_array(rhs);
 
@@ -218,8 +218,8 @@ mod tests {
     #[test]
     fn multiplication_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedCM31::from_array(lhs);
         let packed_rhs = PackedCM31::from_array(rhs);
 
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn negation_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let values = rng.gen();
+        let values = rng.random();
         let packed_values = PackedCM31::from_array(values);
 
         let res = -packed_values;

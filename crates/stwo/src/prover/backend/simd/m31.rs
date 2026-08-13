@@ -2,17 +2,17 @@ use std::iter::Sum;
 use std::mem::transmute;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::ptr;
-use std::simd::{u32x16, Simd};
+use std::simd::{Simd, u32x16};
 
 use bytemuck::{Pod, Zeroable};
 use num_traits::{One, Zero};
-use rand::distributions::{Distribution, Standard};
+use rand::distr::{Distribution, StandardUniform};
 
-use super::qm31::PackedQM31;
 use super::PACKED_M31_BATCH_INVERSE_CHUNK_SIZE;
-use crate::core::fields::m31::{pow2147483645, BaseField, M31, MODULUS_BITS, P};
+use super::qm31::PackedQM31;
+use crate::core::fields::m31::{BaseField, M31, MODULUS_BITS, P, pow2147483645};
 use crate::core::fields::qm31::QM31;
-use crate::core::fields::{batch_inverse_chunked, FieldExpOps};
+use crate::core::fields::{FieldExpOps, batch_inverse_chunked};
 use crate::core::utils;
 
 pub const LOG_N_LANES: u32 = 4;
@@ -141,9 +141,7 @@ impl PackedM31 {
     }
 
     pub fn reduce_simd(value: Simd<u32, N_LANES>) -> Self {
-        unsafe { Self::from_simd_unchecked(value) }
-            .reduce()
-            .reduce()
+        unsafe { Self::from_simd_unchecked(value) }.reduce().reduce()
     }
 }
 
@@ -321,9 +319,9 @@ impl From<BaseField> for PackedM31 {
     }
 }
 
-impl Distribution<PackedM31> for Standard {
+impl Distribution<PackedM31> for StandardUniform {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> PackedM31 {
-        PackedM31::from_array(rng.gen())
+        PackedM31::from_array(rng.random())
     }
 }
 
@@ -638,20 +636,20 @@ mod tests {
     use std::array;
     use std::simd::u32x16;
 
-    use aligned::{Aligned, A64};
+    use aligned::{A64, Aligned};
     use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
 
     use super::PackedM31;
-    use crate::core::fields::m31::{BaseField, M31};
     use crate::core::fields::FieldExpOps;
+    use crate::core::fields::m31::{BaseField, M31};
     use crate::prover::backend::simd::m31::reduce_to_m31_simd;
 
     #[test]
     fn addition_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedM31::from_array(lhs);
         let packed_rhs = PackedM31::from_array(rhs);
 
@@ -663,8 +661,8 @@ mod tests {
     #[test]
     fn subtraction_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedM31::from_array(lhs);
         let packed_rhs = PackedM31::from_array(rhs);
 
@@ -676,8 +674,8 @@ mod tests {
     #[test]
     fn multiplication_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedM31::from_array(lhs);
         let packed_rhs = PackedM31::from_array(rhs);
 
@@ -689,7 +687,7 @@ mod tests {
     #[test]
     fn negation_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let values = rng.gen();
+        let values = rng.random();
         let packed_values = PackedM31::from_array(values);
 
         let res = -packed_values;
@@ -719,7 +717,7 @@ mod tests {
     #[test]
     fn inverse_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let values = rng.gen();
+        let values = rng.random();
         let packed_values = PackedM31::from_array(values);
 
         let res = packed_values.inverse();
@@ -730,7 +728,7 @@ mod tests {
     #[test]
     fn test_reduction() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let vals = std::array::from_fn(|_| rng.gen::<u32>());
+        let vals = std::array::from_fn(|_| rng.random::<u32>());
         let simd_val = u32x16::from_array(vals);
 
         assert_eq!(

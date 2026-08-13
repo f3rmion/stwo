@@ -1,15 +1,15 @@
 use hashbrown::HashMap;
 use itertools::Itertools;
-use tracing::{span, Level};
+use tracing::{Level, span};
 
 use super::ops::MerkleOpsLifted;
+use crate::core::ColumnVec;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 use crate::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 use crate::core::vcs_lifted::verifier::{
     ExtendedMerkleDecommitmentLifted, MerkleDecommitmentLifted, MerkleDecommitmentLiftedAux,
 };
-use crate::core::ColumnVec;
 use crate::prover::backend::{Col, Column};
 
 /// Represents the prover side of a Merkle commitment scheme.
@@ -38,9 +38,7 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
     ) -> Self {
         let _span = span!(Level::TRACE, "Merkle", class = "MerkleCommitment").entered();
         if columns.is_empty() {
-            return Self {
-                layers: vec![B::build_leaves(&[], lifting_log_size)],
-            };
+            return Self { layers: vec![B::build_leaves(&[], lifting_log_size)] };
         }
 
         let mut layers: Vec<Col<B, H::Hash>> = Vec::new();
@@ -57,10 +55,7 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
             let packed_columns = B::pack_leaves_input(&columns);
             let max_log_size = packed_columns[0].len().ilog2();
             assert!(lifting_log_size >= max_log_size);
-            layers.push(B::build_leaves(
-                &packed_columns.iter().collect_vec(),
-                lifting_log_size,
-            ));
+            layers.push(B::build_leaves(&packed_columns.iter().collect_vec(), lifting_log_size));
         } else {
             let sorted_columns = columns.into_iter().sorted_by_key(|c| c.len()).collect_vec();
             let max_log_size = sorted_columns.last().unwrap().len().ilog2();
@@ -81,23 +76,21 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
     ///
     /// # Arguments
     ///
-    /// * `queries_position` - Vector containing the positions of the queries, in increasing order.
+    /// * `query_positions` - Vector containing the positions of the queries. Note that the
+    ///   positions are not necessarily sorted and may contain duplicates.
     /// * `columns` - A vector of references to columns.
     ///
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A vector of queried values. For each query position, the queried values are column values
-    ///   corresponding to the query position, sorted increasingly by column length.
+    /// * A vector `v` of queried values, where `v[col_idx][pos_idx]` contains the evaluation of the
+    ///   `col_idx`-th column at the `query_position[pos_idx]` position.
     /// * A `MerkleDecommitment` containing the hash witness.
     pub fn decommit(
         &self,
         query_positions: &[usize],
         columns: Vec<&Col<B, BaseField>>,
-    ) -> (
-        ColumnVec<Vec<BaseField>>,
-        ExtendedMerkleDecommitmentLifted<H>,
-    ) {
+    ) -> (ColumnVec<Vec<BaseField>>, ExtendedMerkleDecommitmentLifted<H>) {
         // Prepare output buffers.
         let mut queried_values: ColumnVec<Vec<BaseField>> = vec![];
         let mut decommitment = MerkleDecommitmentLifted::<H>::default();
@@ -115,8 +108,8 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
             queried_values.push(res);
         }
 
-        let mut prev_layer_queries = query_positions.to_vec();
-        prev_layer_queries.dedup();
+        let mut prev_layer_queries: Vec<usize> =
+            query_positions.iter().copied().sorted().dedup().collect();
         // The largest log size of a layer is equal to `self.layers.len() - 1`. We start iterating
         // from the layer of log size `self.layers.len() - 2` so that we always have a previous
         // layer available for the computation.
@@ -136,9 +129,7 @@ impl<B: MerkleOpsLifted<H>, H: MerkleHasherLifted> MerkleProverLifted<B, H> {
                 let first = queries_chunk[0];
                 // If the brother of `first` was not queried before, add its hash to the witness.
                 if queries_chunk.len() == 1 {
-                    decommitment
-                        .hash_witness
-                        .push(prev_layer_hashes.at(first ^ 1))
+                    decommitment.hash_witness.push(prev_layer_hashes.at(first ^ 1))
                 }
                 let curr_index = first >> 1;
                 curr_layer_queries.push(curr_index);
@@ -179,8 +170,8 @@ mod test {
     use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher as Blake2sMerkleHasherCurrent;
     use crate::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
     use crate::core::vcs_lifted::test_utils::lift_poly;
-    use crate::prover::backend::cpu::CpuCirclePoly;
     use crate::prover::backend::CpuBackend;
+    use crate::prover::backend::cpu::CpuCirclePoly;
     use crate::prover::vcs::prover::MerkleProver;
 
     #[test]
@@ -190,16 +181,10 @@ mod test {
             MerkleProver::<CpuBackend, Blake2sMerkleHasherCurrent>::commit(vec![]);
         let lifted_merkle_prover =
             MerkleProverLifted::<CpuBackend, Blake2sMerkleHasher>::commit(vec![], 0, 0);
-        assert_eq!(
-            mixed_degree_merkle_prover.layers,
-            lifted_merkle_prover.layers
-        );
+        assert_eq!(mixed_degree_merkle_prover.layers, lifted_merkle_prover.layers);
     }
 
-    fn prepare_merkle() -> (
-        Vec<Vec<BaseField>>,
-        MerkleProverLifted<CpuBackend, Blake2sHasher>,
-    ) {
+    fn prepare_merkle() -> (Vec<Vec<BaseField>>, MerkleProverLifted<CpuBackend, Blake2sHasher>) {
         let max_log_size = 4;
         let columns: Vec<Vec<BaseField>> = (2..=max_log_size)
             .map(|i| (0..1 << i).map(M31::from_u32_unchecked).collect())
@@ -300,22 +285,14 @@ mod test {
         );
 
         assert_eq!(lifted_merkle_prover_1.root(), lifted_merkle_prover_2.root());
-        assert_eq!(
-            mixed_degree_merkle_prover.root(),
-            lifted_merkle_prover_1.root()
-        );
+        assert_eq!(mixed_degree_merkle_prover.root(), lifted_merkle_prover_1.root());
     }
 
     #[test]
     fn test_decommitment_aux() {
         let (columns, merkle_prover) = prepare_merkle();
-        let (
-            _,
-            ExtendedMerkleDecommitmentLifted {
-                decommitment: _,
-                aux,
-            },
-        ) = merkle_prover.decommit(&[1], columns.iter().collect_vec());
+        let (_, ExtendedMerkleDecommitmentLifted { decommitment: _, aux }) =
+            merkle_prover.decommit(&[1], columns.iter().collect_vec());
 
         let mut expected: Vec<HashMap<usize, Blake2sHash>> = vec![];
         merkle_prover

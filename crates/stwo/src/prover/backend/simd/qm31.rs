@@ -4,14 +4,14 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use bytemuck::{Pod, Zeroable};
 use num_traits::{One, Zero};
-use rand::distributions::{Distribution, Standard};
+use rand::distr::{Distribution, StandardUniform};
 
-use super::cm31::PackedCM31;
-use super::m31::{PackedM31, N_LANES};
 use super::PACKED_QM31_BATCH_INVERSE_CHUNK_SIZE;
+use super::cm31::PackedCM31;
+use super::m31::{N_LANES, PackedM31};
 use crate::core::fields::m31::M31;
 use crate::core::fields::qm31::QM31;
-use crate::core::fields::{batch_inverse_chunked, FieldExpOps};
+use crate::core::fields::{FieldExpOps, batch_inverse_chunked};
 use crate::core::utils;
 
 pub type PackedSecureField = PackedQM31;
@@ -26,10 +26,7 @@ unsafe impl Sync for PackedQM31 {}
 impl PackedQM31 {
     /// Constructs a new instance with all vector elements set to `value`.
     pub const fn broadcast(value: QM31) -> Self {
-        Self([
-            PackedCM31::broadcast(value.0),
-            PackedCM31::broadcast(value.1),
-        ])
+        Self([PackedCM31::broadcast(value.0), PackedCM31::broadcast(value.1)])
     }
 
     /// Returns all `a` values such that each vector element is represented as `a + bu`.
@@ -130,10 +127,8 @@ impl Mul for PackedQM31 {
         let ad_p_bc = (self.a() + self.b()) * (rhs.a() + rhs.b()) - ac_p_bd;
         // ac + 2bd + ibd =
         // ac + bd + bd + ibd
-        let l = PackedCM31([
-            ac_p_bd.a() + bd_times_1_plus_i.a(),
-            ac_p_bd.b() + bd_times_1_plus_i.b(),
-        ]);
+        let l =
+            PackedCM31([ac_p_bd.a() + bd_times_1_plus_i.a(), ac_p_bd.b() + bd_times_1_plus_i.b()]);
         Self([l, ad_p_bc])
     }
 }
@@ -308,9 +303,9 @@ impl Neg for PackedQM31 {
     }
 }
 
-impl Distribution<PackedQM31> for Standard {
+impl Distribution<PackedQM31> for StandardUniform {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> PackedQM31 {
-        PackedQM31::from_array(rng.gen())
+        PackedQM31::from_array(rng.random())
     }
 }
 
@@ -343,8 +338,8 @@ mod tests {
     #[test]
     fn addition_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedQM31::from_array(lhs);
         let packed_rhs = PackedQM31::from_array(rhs);
 
@@ -356,8 +351,8 @@ mod tests {
     #[test]
     fn subtraction_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedQM31::from_array(lhs);
         let packed_rhs = PackedQM31::from_array(rhs);
 
@@ -369,8 +364,8 @@ mod tests {
     #[test]
     fn multiplication_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let lhs = rng.gen();
-        let rhs = rng.gen();
+        let lhs = rng.random();
+        let rhs = rng.random();
         let packed_lhs = PackedQM31::from_array(lhs);
         let packed_rhs = PackedQM31::from_array(rhs);
 
@@ -382,7 +377,7 @@ mod tests {
     #[test]
     fn negation_works() {
         let mut rng = SmallRng::seed_from_u64(0);
-        let values = rng.gen();
+        let values = rng.random();
         let packed_values = PackedQM31::from_array(values);
 
         let res = -packed_values;

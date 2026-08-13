@@ -1,25 +1,26 @@
 use std::simd::u32x16;
 use std::vec;
 
-use itertools::{chain, Itertools};
+use itertools::{Itertools, chain};
 use num_traits::One;
+use stwo::core::ColumnVec;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::ColumnVec;
-use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::{PackedBaseField, LOG_N_LANES};
-use stwo::prover::backend::simd::qm31::PackedSecureField;
+use stwo::core::utils::SliceExt;
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedBaseField};
+use stwo::prover::backend::simd::qm31::PackedSecureField;
 use stwo::prover::backend::{Col, Column};
-use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
-use stwo_constraint_framework::{LogupTraceGenerator, Relation, ORIGINAL_TRACE_IDX};
-use tracing::{span, Level};
+use stwo::prover::poly::circle::CircleEvaluation;
+use stwo_constraint_framework::{LogupTraceGenerator, ORIGINAL_TRACE_IDX, Relation};
+use tracing::{Level, span};
 
 use super::{BlakeXorElements, RoundElements};
 use crate::blake::round::blake_round_info;
-use crate::blake::{to_felts, XorAccums, N_ROUND_INPUT_FELTS, STATE_SIZE};
+use crate::blake::{N_ROUND_INPUT_FELTS, STATE_SIZE, XorAccums, to_felts};
 
 pub struct BlakeRoundLookupData {
     /// A vector of (w, [a_col, b_col, c_col]) for each xor lookup.
@@ -52,25 +53,20 @@ impl TraceGenerator {
     }
 
     const fn gen_row(&mut self, vec_row: usize) -> TraceGeneratorRow<'_> {
-        TraceGeneratorRow {
-            gen: self,
-            col_index: 0,
-            vec_row,
-            xor_lookups_index: 0,
-        }
+        TraceGeneratorRow { trace_gen: self, col_index: 0, vec_row, xor_lookups_index: 0 }
     }
 }
 
 /// Trace generator for the constraints defined at [`super::constraints::BlakeRoundEval`]
 struct TraceGeneratorRow<'a> {
-    gen: &'a mut TraceGenerator,
+    trace_gen: &'a mut TraceGenerator,
     col_index: usize,
     vec_row: usize,
     xor_lookups_index: usize,
 }
 impl TraceGeneratorRow<'_> {
     fn append_felt(&mut self, val: u32x16) {
-        self.gen.trace[self.col_index].data[self.vec_row] =
+        self.trace_gen.trace[self.col_index].data[self.vec_row] =
             unsafe { PackedBaseField::from_simd_unchecked(val) };
         self.col_index += 1;
     }
@@ -101,7 +97,7 @@ impl TraceGeneratorRow<'_> {
         chain![input_v.iter(), v.iter(), m.iter()]
             .flat_map(to_felts)
             .enumerate()
-            .for_each(|(i, felt)| self.gen.round_lookup[i].data[self.vec_row] = felt);
+            .for_each(|(i, felt)| self.trace_gen.round_lookup[i].data[self.vec_row] = felt);
     }
 
     fn g(&mut self, v: [&mut u32x16; 4], m0: u32x16, m1: u32x16) {
@@ -180,19 +176,19 @@ impl TraceGeneratorRow<'_> {
     fn xor(&mut self, w: u32, a: u32x16, b: u32x16) -> u32x16 {
         let c = a ^ b;
         self.append_felt(c);
-        if self.gen.xor_lookups.len() <= self.xor_lookups_index {
-            self.gen.xor_lookups.push((
+        if self.trace_gen.xor_lookups.len() <= self.xor_lookups_index {
+            self.trace_gen.xor_lookups.push((
                 w,
                 std::array::from_fn(|_| unsafe {
-                    BaseColumn::uninitialized(1 << self.gen.log_size)
+                    BaseColumn::uninitialized(1 << self.trace_gen.log_size)
                 }),
             ));
         }
-        self.gen.xor_lookups[self.xor_lookups_index].1[0].data[self.vec_row] =
+        self.trace_gen.xor_lookups[self.xor_lookups_index].1[0].data[self.vec_row] =
             unsafe { PackedBaseField::from_simd_unchecked(a) };
-        self.gen.xor_lookups[self.xor_lookups_index].1[1].data[self.vec_row] =
+        self.trace_gen.xor_lookups[self.xor_lookups_index].1[1].data[self.vec_row] =
             unsafe { PackedBaseField::from_simd_unchecked(b) };
-        self.gen.xor_lookups[self.xor_lookups_index].1[2].data[self.vec_row] =
+        self.trace_gen.xor_lookups[self.xor_lookups_index].1[2].data[self.vec_row] =
             unsafe { PackedBaseField::from_simd_unchecked(c) };
         self.xor_lookups_index += 1;
         c
@@ -209,10 +205,7 @@ pub fn generate_trace(
     log_size: u32,
     inputs: &[BlakeRoundInput],
     xor_accum: &mut XorAccums,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    BlakeRoundLookupData,
-) {
+) -> (ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, BlakeRoundLookupData) {
     let _span = span!(Level::INFO, "Round Generation").entered();
     let mut generator = TraceGenerator::new(log_size);
 
@@ -228,11 +221,7 @@ pub fn generate_trace(
     }
     let domain = CanonicCoset::new(log_size).circle_domain();
     (
-        generator
-            .trace
-            .into_iter()
-            .map(|eval| CircleEvaluation::new(domain, eval))
-            .collect(),
+        generator.trace.into_iter().map(|eval| CircleEvaluation::new(domain, eval)).collect(),
         BlakeRoundLookupData {
             xor_lookups: generator.xor_lookups,
             round_lookup: generator.round_lookup,
@@ -245,14 +234,11 @@ pub fn generate_interaction_trace(
     lookup_data: BlakeRoundLookupData,
     xor_lookup_elements: &BlakeXorElements,
     round_lookup_elements: &RoundElements,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
+) -> (ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>, SecureField) {
     let _span = span!(Level::INFO, "Generate round interaction trace").entered();
     let mut logup_gen = LogupTraceGenerator::new(log_size);
 
-    for [(w0, l0), (w1, l1)] in lookup_data.xor_lookups.array_chunks::<2>() {
+    for [(w0, l0), (w1, l1)] in lookup_data.xor_lookups.checked_as_chunks::<2>().iter() {
         let mut col_gen = logup_gen.new_col();
 
         for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {

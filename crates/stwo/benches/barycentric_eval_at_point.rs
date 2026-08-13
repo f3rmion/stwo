@@ -1,13 +1,13 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use stwo::core::circle::CirclePoint;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::CpuBackend;
-use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
+use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::{CircleCoefficients, CircleEvaluation, PolyOps};
 
 const LOG_SIZE: u32 = 20;
 
@@ -16,17 +16,14 @@ fn bench_barycentric_eval_at_secure_point<B: PolyOps>(c: &mut Criterion, id: &st
     let coset = CanonicCoset::new(LOG_SIZE);
     let evals = poly.evaluate(coset.circle_domain());
     let mut rng = SmallRng::seed_from_u64(0);
-    let x = rng.gen();
-    let y = rng.gen();
+    let x = rng.random();
+    let y = rng.random();
     let point = CirclePoint { x, y };
     let weights =
         CircleEvaluation::<B, BaseField, BitReversedOrder>::barycentric_weights(coset, point);
-    c.bench_function(
-        &format!("{id} barycentric_eval_at_secure_field_point 2^{LOG_SIZE}"),
-        |b| {
-            b.iter(|| B::barycentric_eval_at_point(black_box(&evals), black_box(&weights)));
-        },
-    );
+    c.bench_function(&format!("{id} barycentric_eval_at_secure_field_point 2^{LOG_SIZE}"), |b| {
+        b.iter(|| B::barycentric_eval_at_point(black_box(&evals), black_box(&weights)));
+    });
 }
 
 fn bench_barycentric_eval_at_secure_point_weights_calculation<B: PolyOps>(
@@ -34,8 +31,8 @@ fn bench_barycentric_eval_at_secure_point_weights_calculation<B: PolyOps>(
     id: &str,
 ) {
     let mut rng = SmallRng::seed_from_u64(0);
-    let x = rng.gen();
-    let y = rng.gen();
+    let x = rng.random();
+    let y = rng.random();
     let point = CirclePoint { x, y };
     let coset = CanonicCoset::new(LOG_SIZE);
     c.bench_function(

@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use itertools::{all, Itertools};
+    use itertools::{Itertools, all};
     use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
     use rayon::slice::ParallelSlice;
     use stwo::core::fields::m31::M31;
-    use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
+    use stwo::core::utils::SliceExt;
+    use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES, PackedM31};
     use stwo_air_utils_derive::{IterMut, ParIterMut, Uninitialized};
 
     use crate::trace::component_trace::ComponentTrace;
@@ -21,11 +22,7 @@ mod tests {
     #[test]
     fn test_derived_lookup_data() {
         const LOG_SIZE: u32 = 6;
-        let LookupData {
-            field0,
-            field1,
-            field2,
-        } = unsafe { LookupData::uninitialized(LOG_SIZE) };
+        let LookupData { field0, field1, field2 } = unsafe { LookupData::uninitialized(LOG_SIZE) };
 
         let lengths = [
             [field0.len()].as_slice(),
@@ -48,26 +45,20 @@ mod tests {
             Vec<_>,
             (Vec<_>, Vec<_>),
         ) = arr
-            .array_chunks::<N_LANES>()
+            .checked_as_chunks::<N_LANES>()
+            .iter()
             .map(|x| {
                 let x = PackedM31::from_array(*x);
                 let x1 = x + PackedM31::broadcast(M31(1));
                 let x2 = x + x1;
                 let x3 = x + x1 + x2;
                 let x4 = x + x1 + x2 + x3;
-                (
-                    x4,
-                    [x1, x1.double()],
-                    ([x2, x2.double()], [x3, x3.double()]),
-                )
+                (x4, [x1, x1.double()], ([x2, x2.double()], [x3, x3.double()]))
             })
             .multiunzip();
 
-        trace
-            .iter_mut()
-            .zip(arr.chunks(N_LANES))
-            .zip(lookup_data.iter_mut())
-            .for_each(|((row, input), lookup_data)| {
+        trace.iter_mut().zip(arr.chunks(N_LANES)).zip(lookup_data.iter_mut()).for_each(
+            |((row, input), lookup_data)| {
                 *row[0] = PackedM31::from_array(input.try_into().unwrap());
                 *row[1] = *row[0] + PackedM31::broadcast(M31(1));
                 *row[2] = *row[0] + *row[1];
@@ -77,7 +68,8 @@ mod tests {
                 *lookup_data.field1 = [*row[1], row[1].double()];
                 *lookup_data.field2[0] = [*row[2], row[2].double()];
                 *lookup_data.field2[1] = [*row[3], row[3].double()];
-            });
+            },
+        );
         let (actual0, actual1, actual2) = (
             lookup_data.field0,
             lookup_data.field1,
@@ -103,6 +95,7 @@ mod tests {
 
     #[test]
     fn test_derived_lookup_data_par_iter() {
+        crate::ensure_rayon_pool();
         const N_COLUMNS: usize = 5;
         const LOG_N_ROWS: u32 = 8;
         let mut trace = ComponentTrace::<N_COLUMNS>::zeroed(LOG_N_ROWS);
@@ -113,18 +106,15 @@ mod tests {
             Vec<_>,
             (Vec<_>, Vec<_>),
         ) = arr
-            .array_chunks::<N_LANES>()
+            .checked_as_chunks::<N_LANES>()
+            .iter()
             .map(|x| {
                 let x = PackedM31::from_array(*x);
                 let x1 = x + PackedM31::broadcast(M31(1));
                 let x2 = x + x1;
                 let x3 = x + x1 + x2;
                 let x4 = x + x1 + x2 + x3;
-                (
-                    x4,
-                    [x1, x1.double()],
-                    ([x2, x2.double()], [x3, x3.double()]),
-                )
+                (x4, [x1, x1.double()], ([x2, x2.double()], [x3, x3.double()]))
             })
             .multiunzip();
 

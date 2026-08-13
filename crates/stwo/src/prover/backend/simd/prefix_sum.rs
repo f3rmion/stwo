@@ -1,15 +1,15 @@
 use std::iter::zip;
 use std::ops::{AddAssign, Sub};
 
-use itertools::{izip, Itertools};
+use itertools::{Itertools, izip};
 use num_traits::Zero;
 
 use crate::core::fields::m31::BaseField;
 use crate::core::utils::{
-    bit_reverse, circle_domain_order_to_coset_order, coset_order_to_circle_domain_order,
+    SliceExt, bit_reverse, circle_domain_order_to_coset_order, coset_order_to_circle_domain_order,
 };
-use crate::prover::backend::simd::m31::{PackedBaseField, N_LANES};
 use crate::prover::backend::simd::SimdBackend;
+use crate::prover::backend::simd::m31::{N_LANES, PackedBaseField};
 use crate::prover::backend::{Col, Column};
 
 /// Performs a inclusive prefix sum on values in `Coset` order when provided
@@ -33,7 +33,10 @@ pub fn inclusive_prefix_sum(
     // Handle the first two up sweep rounds manually.
     // Required due different ordering of `CircleDomain` and `Coset`.
     // Evaluations are provided in bit-reversed `CircleDomain` order.
-    for ([l0, l1], [r0, r1]) in izip!(l_half.array_chunks_mut(), r_half.array_chunks_mut().rev()) {
+    for ([l0, l1], [r0, r1]) in izip!(
+        l_half.checked_as_chunks_mut::<2>().iter_mut(),
+        r_half.checked_as_chunks_mut::<2>().iter_mut().rev()
+    ) {
         let (mut half_coset0_lo, half_coset1_hi_rev) = l0.deinterleave(*l1);
         let half_coset1_hi = half_coset1_hi_rev.reverse();
         let (mut half_coset0_hi, half_coset1_lo_rev) = r0.deinterleave(*r1);
@@ -56,7 +59,7 @@ pub fn inclusive_prefix_sum(
     let mut chunk_size = half_coset0_sums.len() / 2;
     while chunk_size > 1 {
         let (lows, highs) = half_coset0_sums.split_at_mut(chunk_size);
-        zip(lows.array_chunks_mut(), highs.array_chunks())
+        zip(lows.checked_as_chunks_mut::<2>().iter_mut(), highs.checked_as_chunks::<2>().iter())
             .for_each(|([lo, _], [hi, _])| up_sweep_val(lo, *hi));
         chunk_size /= 2;
     }
@@ -84,8 +87,11 @@ pub fn inclusive_prefix_sum(
     let mut chunk_size = 2;
     while chunk_size < half_coset0_sums.len() {
         let (lows, highs) = half_coset0_sums.split_at_mut(chunk_size);
-        zip(lows.array_chunks_mut(), highs.array_chunks_mut())
-            .for_each(|([lo, _], [hi, _])| down_sweep_val(lo, hi));
+        zip(
+            lows.checked_as_chunks_mut::<2>().iter_mut(),
+            highs.checked_as_chunks_mut::<2>().iter_mut(),
+        )
+        .for_each(|([lo, _], [hi, _])| down_sweep_val(lo, hi));
         chunk_size *= 2;
     }
     // Handle last two down sweep rounds manually.
@@ -98,7 +104,10 @@ pub fn inclusive_prefix_sum(
         down_sweep_val(&mut lo, &mut hi);
         (half_coset0_sums[lo_index], half_coset0_sums[hi_index]) = (lo, hi);
     }
-    for ([l0, l1], [r0, r1]) in izip!(l_half.array_chunks_mut(), r_half.array_chunks_mut().rev()) {
+    for ([l0, l1], [r0, r1]) in izip!(
+        l_half.checked_as_chunks_mut::<2>().iter_mut(),
+        r_half.checked_as_chunks_mut::<2>().iter_mut().rev()
+    ) {
         let mut half_coset0_lo = *l0;
         let mut half_coset1_lo = *r0;
         down_sweep_val(&mut half_coset0_lo, &mut half_coset1_lo);
@@ -146,15 +155,15 @@ mod tests {
     use test_log::test;
 
     use super::inclusive_prefix_sum;
+    use crate::prover::backend::Column;
     use crate::prover::backend::simd::column::BaseColumn;
     use crate::prover::backend::simd::prefix_sum::inclusive_prefix_sum_slow;
-    use crate::prover::backend::Column;
 
     #[test]
     fn exclusive_prefix_sum_simd_with_log_size_3_works() {
         const LOG_N: u32 = 3;
         let mut rng = SmallRng::seed_from_u64(0);
-        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.gen()).collect();
+        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.random()).collect();
         let expected = inclusive_prefix_sum_slow(evals.clone());
 
         let res = inclusive_prefix_sum(evals);
@@ -166,7 +175,7 @@ mod tests {
     fn exclusive_prefix_sum_simd_with_log_size_6_works() {
         const LOG_N: u32 = 6;
         let mut rng = SmallRng::seed_from_u64(0);
-        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.gen()).collect();
+        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.random()).collect();
         let expected = inclusive_prefix_sum_slow(evals.clone());
 
         let res = inclusive_prefix_sum(evals);
@@ -178,7 +187,7 @@ mod tests {
     fn exclusive_prefix_sum_simd_with_log_size_8_works() {
         const LOG_N: u32 = 8;
         let mut rng = SmallRng::seed_from_u64(0);
-        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.gen()).collect();
+        let evals: BaseColumn = (0..1 << LOG_N).map(|_| rng.random()).collect();
         let expected = inclusive_prefix_sum_slow(evals.clone());
 
         let res = inclusive_prefix_sum(evals);

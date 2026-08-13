@@ -20,21 +20,13 @@ impl From<Blake2sHash> for Vec<u8> {
 
 impl From<Vec<u8>> for Blake2sHash {
     fn from(value: Vec<u8>) -> Self {
-        Self(
-            value
-                .try_into()
-                .expect("Failed converting Vec<u8> to Blake2Hash type"),
-        )
+        Self(value.try_into().expect("Failed converting Vec<u8> to Blake2Hash type"))
     }
 }
 
 impl From<&[u8]> for Blake2sHash {
     fn from(value: &[u8]) -> Self {
-        Self(
-            value
-                .try_into()
-                .expect("Failed converting &[u8] to Blake2sHash Type!"),
-        )
+        Self(value.try_into().expect("Failed converting &[u8] to Blake2sHash Type!"))
     }
 }
 
@@ -47,6 +39,16 @@ impl AsRef<[u8]> for Blake2sHash {
 impl From<Blake2sHash> for [u8; 32] {
     fn from(val: Blake2sHash) -> Self {
         val.0
+    }
+}
+
+impl From<[u32; 8]> for Blake2sHash {
+    fn from(val: [u32; 8]) -> Self {
+        let mut bytes = [0u8; 32];
+        for (chunk, word) in bytes.chunks_exact_mut(4).zip(val) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        Self(bytes)
     }
 }
 
@@ -76,9 +78,7 @@ pub struct Blake2sHasherGeneric<const IS_M31_OUTPUT: bool> {
 
 impl<const IS_M31_OUTPUT: bool> Blake2sHasherGeneric<IS_M31_OUTPUT> {
     pub fn new() -> Self {
-        Self {
-            state: Blake2s256::new(),
-        }
+        Self { state: Blake2s256::new() }
     }
 
     pub fn update(&mut self, data: &[u8]) {

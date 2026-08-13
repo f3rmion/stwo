@@ -6,8 +6,8 @@ use crate::core::channel::{Channel, MerkleChannel};
 use crate::core::fields::qm31::SecureField;
 use crate::core::proof_of_work::GrindOps;
 use crate::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-use crate::prover::backend::simd::SimdBackend;
 use crate::prover::backend::BackendForChannel;
+use crate::prover::backend::simd::SimdBackend;
 use crate::prover::vcs_lifted::ops::MerkleOpsLifted;
 
 #[derive(Debug, Clone, Default)]
@@ -47,11 +47,7 @@ impl<C: Channel> Channel for LoggingChannel<C> {
 
     fn draw_secure_felts(&mut self, n_felts: usize) -> Vec<SecureField> {
         let _ = debug_span!("Channel draw_secure_felts");
-        log_draw(
-            |ch, n| C::draw_secure_felts(ch, n),
-            &mut self.channel,
-            n_felts,
-        )
+        log_draw(|ch, n| C::draw_secure_felts(ch, n), &mut self.channel, n_felts)
     }
 
     fn draw_u32s(&mut self) -> Vec<u32> {
@@ -133,15 +129,12 @@ mod tests {
         let mut logging_channel = LoggingChannel::<Blake2sChannel>::default();
         let mut regular_channel = Blake2sChannel::default();
 
-        let felts = [
-            rng.gen::<SecureField>(),
-            rng.gen::<SecureField>(),
-            rng.gen::<SecureField>(),
-        ];
+        let felts =
+            [rng.random::<SecureField>(), rng.random::<SecureField>(), rng.random::<SecureField>()];
         logging_channel.mix_felts(&felts);
         regular_channel.mix_felts(&felts);
 
-        let value = rng.gen::<u64>();
+        let value = rng.random::<u64>();
         logging_channel.mix_u64(value);
         regular_channel.mix_u64(value);
 
@@ -149,7 +142,7 @@ mod tests {
         let felt2 = regular_channel.draw_secure_felt();
         assert_eq!(felt1, felt2);
 
-        let n_felts = rng.gen_range(1..10);
+        let n_felts = rng.random_range(1..10);
         let felts1 = logging_channel.draw_secure_felts(n_felts);
         let felts2 = regular_channel.draw_secure_felts(n_felts);
         assert_eq!(felts1, felts2);

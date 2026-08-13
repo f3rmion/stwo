@@ -19,7 +19,7 @@ impl<T> Deref for MaybeOwned<'_, T> {
     fn deref(&self) -> &T {
         match self {
             MaybeOwned::Borrowed(r) => r,
-            MaybeOwned::Owned(ref v) => v,
+            MaybeOwned::Owned(v) => v,
         }
     }
 }
@@ -63,10 +63,37 @@ impl<'a, I: Iterator> PeekableExt<'a, I> for Peekable<I> {
         &'a mut self,
         predicate: P,
     ) -> PeekTakeWhile<'a, I, P> {
-        PeekTakeWhile {
-            iter: self,
-            predicate,
-        }
+        PeekTakeWhile { iter: self, predicate }
+    }
+}
+
+/// Extension trait providing `checked_as_chunks` / `checked_as_chunks_mut` on slices.
+/// Wraps `as_chunks`, asserting that no remainder is left over.
+pub trait SliceExt {
+    type Item;
+
+    /// Splits the slice into chunks of exactly `N` elements and returns them as a slice of arrays.
+    /// Panics if the slice length is not a multiple of `N`.
+    fn checked_as_chunks<const N: usize>(&self) -> &[[Self::Item; N]];
+
+    /// Splits the slice into mutable chunks of exactly `N` elements.
+    /// Panics if the slice length is not a multiple of `N`.
+    fn checked_as_chunks_mut<const N: usize>(&mut self) -> &mut [[Self::Item; N]];
+}
+
+impl<T> SliceExt for [T] {
+    type Item = T;
+
+    fn checked_as_chunks<const N: usize>(&self) -> &[[T; N]] {
+        let (chunks, remainder) = self.as_chunks::<N>();
+        assert!(remainder.is_empty());
+        chunks
+    }
+
+    fn checked_as_chunks_mut<const N: usize>(&mut self) -> &mut [[T; N]] {
+        let (chunks, remainder) = self.as_chunks_mut::<N>();
+        assert!(remainder.is_empty());
+        chunks
     }
 }
 
@@ -169,11 +196,7 @@ pub const fn circle_domain_index_to_coset_index(
     log_domain_size: u32,
 ) -> usize {
     let n = 1 << log_domain_size;
-    if circle_index < n / 2 {
-        circle_index * 2
-    } else {
-        (n - 1 - circle_index) * 2 + 1
-    }
+    if circle_index < n / 2 { circle_index * 2 } else { (n - 1 - circle_index) * 2 + 1 }
 }
 
 /// Converts an index within a [`Coset`] to the corresponding index in a [`CircleDomain`].
@@ -283,10 +306,7 @@ mod tests {
             .map(|index| {
                 let prev_index =
                     previous_bit_reversed_circle_domain_index(index, log_size - 3, log_size);
-                (
-                    bit_reversed_evaluation[index],
-                    bit_reversed_evaluation[prev_index],
-                )
+                (bit_reversed_evaluation[index], bit_reversed_evaluation[prev_index])
             })
             .sorted()
             .collect_vec();
